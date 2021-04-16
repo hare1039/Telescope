@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log"
 	"path"
 	"strconv"
 	"strings"
@@ -115,5 +114,5 @@ func (c *IPFSCache) AddRecord(number uint64, representationID string) {
 	}
 
 	c.IPFSCachedSegments[number].Add(representationID)
-	log.Println("Add segment", number, ":", representationID)
+	//	log.Println("Add segment", number, ":", representationID)
 }
