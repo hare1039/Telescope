@@ -22,7 +22,7 @@ import (
 
 var remote *url.URL
 var ipfsCaches map[string]*IPFSCache
-var backEndBandwidth float64 = 0
+var backEndBandwidth float64 = 25 * 1024 * 1024
 var deltaRate float64 = 0.6
 var IPFSDelay uint64 = 0
 var httpHeadRequests chan func()
@@ -34,6 +34,7 @@ var busyQueue *lane.Deque
 
 func updateBackendBandwidth(curBW float64) {
 	backEndBandwidth = deltaRate*backEndBandwidth + (1.0-deltaRate)*curBW
+	//	backEndBandwidth = 25 * 1024 * 1024
 	log.Println("Update backEndBandwidth", backEndBandwidth)
 }
 
@@ -92,6 +93,23 @@ func preloadHigherBitrate(ipfscache *IPFSCache, fullpath string) {
 			break
 		}
 	}
+}
+
+func pureProxyHandle(c *gin.Context) {
+	fullpath := c.Param("path")
+
+	proxy := httputil.NewSingleHostReverseProxy(remote)
+	proxy.Director = func(req *http.Request) {
+		req.Header = c.Request.Header
+		delete(req.Header, "If-Modified-Since")
+		delete(req.Header, "If-None-Match")
+		req.Host = remote.Host
+		req.URL.Scheme = remote.Scheme
+		req.URL.Host = remote.Host
+		req.URL.Path = fullpath
+	}
+
+	proxy.ServeHTTP(c.Writer, c.Request)
 }
 
 func proxyHandle(c *gin.Context) {
@@ -248,6 +266,7 @@ func main() {
 	r := gin.Default()
 
 	r.Any("/*path", proxyHandle)
+	//	r.Any("/*path", pureProxyHandle)
 
 	r.Run(os.Args[2])
 }
