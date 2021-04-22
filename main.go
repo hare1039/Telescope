@@ -10,14 +10,12 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/oleiade/lane"
 	"github.com/unki2aut/go-mpd"
-	"github.com/unki2aut/go-xsd-types"
 )
 
 var remote *url.URL
@@ -35,7 +33,7 @@ var busyQueue *lane.Deque
 func updateBackendBandwidth(curBW float64) {
 	backEndBandwidth = deltaRate*backEndBandwidth + (1.0-deltaRate)*curBW
 	//	backEndBandwidth = 25 * 1024 * 1024
-	log.Println("Update backEndBandwidth", backEndBandwidth)
+	log.Println("Update backEndBandwidth", int64(backEndBandwidth/1024), "kbits")
 }
 
 func httpHeadRequest() {
@@ -55,37 +53,27 @@ func httpHeadRequest() {
 	}
 }
 
-func preloadHigherBitrate(ipfscache *IPFSCache, fullpath string) {
+func preloadNextSegment(ipfscache *IPFSCache, fullpath string) {
 	ID, number := ipfscache.ParseIDNumber(fullpath)
-	IDnum, _ := strconv.Atoi(ID)
-	for {
-		IDnum += 1
-		ID = fmt.Sprint(IDnum)
-		if ipfscache.IPFSCachedSegments[number] == nil ||
-			!ipfscache.IPFSCachedSegments[number].Has(ID) {
-			break
-		}
-	}
 
 	pathkey := path.Dir(fullpath)
 	for prefix, value := range ipfscache.URLMatcher {
 		if value.ID == ID {
+			busyChan <- emptyT{}
 			httpHeadRequests <- func() {
-				next := "http://" + remote.Host + pathkey + "/" + prefix + fmt.Sprint(number) + value.Suffix
-				//log.Println("HTTP HEAD:", next)
-				//if _, err := http.Head(next); err == nil {
-				log.Println("HTTP Get:", next)
+				next := "http://" + remote.Host + pathkey + "/" + prefix + fmt.Sprint(number+1) + value.Suffix
 
-				startReq := time.Now().UnixNano()
+				log.Println("HTTP Get:", next)
+				ipfscache.AddRecord(number, ID)
+
+				startReq := time.Now()
 				if resp, err := http.Get(next); err == nil {
-					delta := time.Now().UnixNano() - startReq
+					delta := time.Since(startReq)
 					defer resp.Body.Close()
 
-					currentBandwidthNS := float64(resp.ContentLength) * 8 / float64(delta)
+					currentBandwidthNS := float64(resp.ContentLength) / float64(delta/time.Nanosecond)
 					curBW := currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
 					updateBackendBandwidth(curBW)
-
-					ipfscache.AddRecord(number, ID)
 				} else {
 					log.Println("HTTP HEAD failed:", err)
 				}
@@ -95,28 +83,34 @@ func preloadHigherBitrate(ipfscache *IPFSCache, fullpath string) {
 	}
 }
 
-func pureProxyHandle(c *gin.Context) {
-	fullpath := c.Param("path")
+func findCachedSegment(fullpath string) string {
+	ID, number := ipfscache.ParseIDNumber(fullpath)
 
-	proxy := httputil.NewSingleHostReverseProxy(remote)
-	proxy.Director = func(req *http.Request) {
-		req.Header = c.Request.Header
-		delete(req.Header, "If-Modified-Since")
-		delete(req.Header, "If-None-Match")
-		req.Host = remote.Host
-		req.URL.Scheme = remote.Scheme
-		req.URL.Host = remote.Host
-		req.URL.Path = fullpath
+	pathkey := path.Dir(fullpath)
+	for prefix, value := range ipfscache.URLMatcher {
+		if value.ID == ID {
+			return "http://" + remote.Host + pathkey + "/" + prefix + fmt.Sprint(number) + value.Suffix
+		}
 	}
 
-	proxy.ServeHTTP(c.Writer, c.Request)
+	return "" // should not be here
 }
 
 func proxyHandle(c *gin.Context) {
 	fullpath := c.Param("path")
 	pathkey := path.Dir(fullpath)
 	clientID := c.Request.Header.Get("clientID")
-	//	log.Println("clientID:", clientID)
+	frontBW := c.Request.Header.Get("frontBW")
+	if clientID != "" {
+		log.Println("clientID:", clientID)
+		log.Println("clientBW:", frontBW)
+	}
+
+	IPFSCachedPath := false
+	if ipfscache, ok := ipfsCaches[pathkey]; ok {
+		IPFSCachedPath = ipfsCaches[pathkey].AlreadyCached(fullpath)
+		ipfscache.AddRecordFromURL(clientID, fullpath)
+	}
 
 	proxy := httputil.NewSingleHostReverseProxy(remote)
 	proxy.Director = func(req *http.Request) {
@@ -129,19 +123,7 @@ func proxyHandle(c *gin.Context) {
 		req.URL.Path = fullpath
 	}
 
-	enableModify := true
-	IPFSCachedPath := false
-	if ipfscache, ok := ipfsCaches[pathkey]; ok {
-		IPFSCachedPath = ipfsCaches[pathkey].AlreadyCached(fullpath)
-
-		err := ipfscache.AddRecordFromURL(clientID, fullpath)
-		if err != nil || ipfscache.ShouldEnd[clientID] {
-			enableModify = false
-			log.Println("enableModify off")
-		}
-	}
-
-	if strings.Contains(fullpath, ".mpd") && enableModify {
+	if strings.Contains(fullpath, ".mpd") {
 		proxy.ModifyResponse = func(r *http.Response) error {
 			if r.StatusCode != 200 {
 				log.Println(r)
@@ -163,49 +145,12 @@ func proxyHandle(c *gin.Context) {
 				ipfsCaches[pathkey] = NewIPFSCache(mpd)
 			}
 
-			mpdtype := "dynamic"
-			mpd.Type = &mpdtype
-			mpd.MinimumUpdatePeriod = &xsd.Duration{Seconds: 1}
-
-			timeZero, _ := xsd.DateTimeFromString("1970-01-01T00:00:00Z")
-			mpd.AvailabilityStartTime = timeZero
-
-			cachedSet, latest := ipfsCaches[pathkey].Latest(clientID)
-			log.Println("For segment", latest, ":", cachedSet)
-
-			var off uint64 = 0
-			for _, p := range mpd.Period {
-				for _, adapt := range p.AdaptationSets {
-					for i, _ := range adapt.Representations {
-						representation := &adapt.Representations[i]
-						representation.SegmentTemplate.PresentationTimeOffset = &off
-
-						if !cachedSet.Has(*representation.ID) {
-							size := float64(*representation.SegmentTemplate.Duration) * float64(*representation.Bandwidth)
-							time := float64(*representation.SegmentTemplate.Duration) - (size / backEndBandwidth)
-							if time < 0.1 {
-								time = 0.1
-							}
-
-							*representation.Bandwidth = uint64(size / time)
-						}
-					}
-				}
-			}
-			mpd.Period[0].Start = &xsd.Duration{}
-
-			newmpd, err := mpd.Encode()
-			if err != nil {
-				fmt.Println("Encode failed. Returning the original one:", err)
-				return nil
-			}
-
-			buf := bytes.NewBuffer(newmpd)
+			buf := bytes.NewBuffer(b)
 			r.Body = ioutil.NopCloser(buf)
 			r.Header["Content-Length"] = []string{fmt.Sprint(buf.Len())}
 			r.Header["Last-Modified"] = []string{time.Now().UTC().Format(http.TimeFormat)}
 			r.Header["Cache-Control"] = []string{"no-cache"}
-			//			log.Println("MPD Modified")
+
 			return nil
 		}
 	} else {
@@ -213,7 +158,7 @@ func proxyHandle(c *gin.Context) {
 
 		defer func() {
 			busyQueue.Pop()
-			if busyQueue.Empty() && (!enableModify || IPFSCachedPath) {
+			if busyQueue.Empty() && IPFSCachedPath {
 				busyChan <- emptyT{}
 			}
 		}()
@@ -225,26 +170,23 @@ func proxyHandle(c *gin.Context) {
 		}
 	}()
 
-	startReq := time.Now().UnixNano()
 	proxy.ServeHTTP(c.Writer, c.Request)
-	delta := time.Now().UnixNano() - startReq
-	size := c.Writer.Size()
-
-	//	IPFSCachedPath = false
-	//	log.Println(size, delta, IPFSCachedPath)
-	if size > 100000 && delta != 0 && !IPFSCachedPath {
-		go func() {
-			currentBandwidthNS := float64(size) * 8 / float64(delta)
-			curBW := currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
-			//			log.Println("BW", size, delta, currentBandwidthNS, curBW)
-
-			updateBackendBandwidth(curBW)
-			if ipfscache, ok := ipfsCaches[pathkey]; ok {
-				preloadHigherBitrate(ipfscache, fullpath)
-			}
-		}()
-	}
+	go func() {
+		if ipfscache, ok := ipfsCaches[pathkey]; ok {
+			preloadNextSegment(ipfscache, fullpath)
+		}
+	}()
 }
+
+//func FrontendBandwidthEstimate(c *gin.Context) {
+//	t := time.Now()
+//	log.Println("before")
+//
+//	c.Next()
+//
+//	delta := time.Since(t)
+//	log.Println("after", delta, c.Writer.Status())
+//}
 
 func main() {
 	if len(os.Args) != 3 {
@@ -264,6 +206,9 @@ func main() {
 	go httpHeadRequest()
 
 	r := gin.Default()
+	//	r.Use(func(c *gin.Context) {
+	//		FrontendBandwidthEstimate(c)
+	//	})
 
 	r.Any("/*path", proxyHandle)
 	//	r.Any("/*path", pureProxyHandle)
