@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"path"
 	"strconv"
 	"strings"
@@ -12,8 +13,9 @@ import (
 )
 
 type Matcher struct {
-	ID     string
-	Suffix string
+	ID        string
+	Suffix    string
+	Bandwidth float64
 }
 
 type IPFSCache struct {
@@ -48,8 +50,9 @@ func (c *IPFSCache) PrepareURLMatcher() {
 				segmentLength = *representation.SegmentTemplate.Duration / *representation.SegmentTemplate.Timescale
 
 				c.URLMatcher[(*representation.SegmentTemplate.Media)[:pos]] = Matcher{
-					ID:     *representation.ID,
-					Suffix: (*representation.SegmentTemplate.Media)[pos+len("$Number$"):],
+					ID:        *representation.ID,
+					Suffix:    (*representation.SegmentTemplate.Media)[pos+len("$Number$"):],
+					Bandwidth: float64(*representation.Bandwidth),
 				}
 			}
 		}
@@ -115,4 +118,8 @@ func (c *IPFSCache) AddRecord(number uint64, representationID string) {
 
 	c.IPFSCachedSegments[number].Add(representationID)
 	//	log.Println("Add segment", number, ":", representationID)
+}
+
+func (c *IPFSCache) Print() {
+	log.Println("x")
 }
