@@ -1,122 +1,127 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/scylladb/go-set/strset"
+	"github.com/scylladb/go-set/iset"
 	"github.com/unki2aut/go-mpd"
 )
 
 type Matcher struct {
-	ID        string
-	Suffix    string
-	Bandwidth float64
+	QualityString string
+	Quality       int
+	Suffix        string
+	Bandwidth     float64
 }
 
 type IPFSCache struct {
-	// every mpd(url.URL) at number
-	IPFSCachedSegments map[uint64]*strset.Set
+	IPFSCachedSegments map[uint64]*iset.Set
 	mpdTree            mpd.MPD
+	SegmentDuration    time.Duration
 	URLMatcher         map[string]Matcher
-	LatestProgress     map[string]uint64
-	MaxSegmentNumber   uint64
-	ShouldEnd          map[string]bool
 }
 
 func NewIPFSCache(m *mpd.MPD) *IPFSCache {
 	c := new(IPFSCache)
-	c.IPFSCachedSegments = make(map[uint64]*strset.Set)
+	c.IPFSCachedSegments = make(map[uint64]*iset.Set)
 	c.URLMatcher = make(map[string]Matcher)
 	c.mpdTree = *m
-	c.LatestProgress = make(map[string]uint64)
 	c.PrepareURLMatcher()
-	c.ShouldEnd = make(map[string]bool)
 	return c
 }
 
+func Stoi(s string) int {
+	r, _ := strconv.Atoi(s)
+	return r
+}
+
 func (c *IPFSCache) PrepareURLMatcher() {
-	c.MaxSegmentNumber = 0
-	var segmentLength uint64
 	for _, p := range c.mpdTree.Period {
 		for _, adapt := range p.AdaptationSets {
 			for i, _ := range adapt.Representations {
 				representation := &adapt.Representations[i]
 				pos := strings.LastIndex(*representation.SegmentTemplate.Media, "$Number$")
-				segmentLength = *representation.SegmentTemplate.Duration / *representation.SegmentTemplate.Timescale
+				c.SegmentDuration = time.Duration(*representation.SegmentTemplate.Duration / *representation.SegmentTemplate.Timescale) * (time.Second / time.Nanosecond)
 
 				c.URLMatcher[(*representation.SegmentTemplate.Media)[:pos]] = Matcher{
-					ID:        *representation.ID,
-					Suffix:    (*representation.SegmentTemplate.Media)[pos+len("$Number$"):],
-					Bandwidth: float64(*representation.Bandwidth),
+					QualityString: *representation.ID,
+					Quality:       Stoi(*representation.ID),
+					Suffix:        (*representation.SegmentTemplate.Media)[pos+len("$Number$"):],
+					Bandwidth:     float64(*representation.Bandwidth),
 				}
 			}
 		}
-
-		leng, _ := p.Duration.ToSeconds()
-		var lengInt uint64 = uint64(leng)
-		c.MaxSegmentNumber += lengInt / segmentLength
 	}
 }
 
-func (c *IPFSCache) AlreadyCached(url string) bool {
-	ID, number := c.ParseIDNumber(url)
-	if number == 0 || c.IPFSCachedSegments[number] == nil {
+func (c *IPFSCache) AlreadyCachedUrl(url string) bool {
+	segment, quality := c.ParseSegmentQuality(url)
+	return c.AlreadyCached(segment, quality)
+}
+
+func (c *IPFSCache) AlreadyCached(segment uint64, quality int) bool {
+	if segment == 0 || c.IPFSCachedSegments[segment] == nil {
 		return false
 	}
 
-	return c.IPFSCachedSegments[number].Has(ID)
+	return c.IPFSCachedSegments[segment].Has(quality)
 }
 
-func (c *IPFSCache) ParseIDNumber(url string) (string, uint64) {
-	var ID string
-	var number uint64
+func (c *IPFSCache) GreatestQuality(segment uint64) int {
+	max := 0
+	if c.IPFSCachedSegments[segment] == nil {
+		return max
+	}
+	for _, cachedQuality := range c.IPFSCachedSegments[segment].List() {
+		if cachedQuality > max {
+			max = cachedQuality
+		}
+	}
+	return max
+}
+
+func (c *IPFSCache) FormUrlBySegmentQuality(segment uint64, quality int) string {
+	for prefix, value := range c.URLMatcher {
+		if value.Quality == quality {
+			return prefix + fmt.Sprint(segment) + value.Suffix
+		}
+	}
+	return ""
+}
+
+func (c *IPFSCache) ParseSegmentQuality(url string) (uint64, int) {
+	var quality int
+	var segment uint64
 	url = path.Base(url)
 	for key, value := range c.URLMatcher {
 		if strings.HasPrefix(url, key) {
 			url = strings.TrimPrefix(url, key)
-			n, _ := strconv.Atoi(strings.TrimSuffix(url, value.Suffix))
-			number = uint64(n)
-			ID = value.ID
+			segment = uint64(Stoi(strings.TrimSuffix(url, value.Suffix)))
+			quality = value.Quality
 		}
 	}
-	return ID, number
+	return segment, quality
 }
 
-func (c *IPFSCache) AddRecordFromURL(ipaddress string, url string) error {
-	ID, number := c.ParseIDNumber(url)
-	if number == c.MaxSegmentNumber {
-		c.ShouldEnd[ipaddress] = true
-		fmt.Println("throw error:", number, c.MaxSegmentNumber)
-		return errors.New("Overheated")
-	}
-
-	if number != 0 {
-		c.LatestProgress[ipaddress] = number
-		c.AddRecord(number, ID)
+func (c *IPFSCache) AddRecordFromURL(url string) error {
+	segment, quality := c.ParseSegmentQuality(url)
+	if segment != 0 {
+		c.AddRecord(segment, quality)
 	}
 	return nil
 }
 
-func (c *IPFSCache) Latest(ipaddress string) (*strset.Set, uint64) {
-	latest := c.LatestProgress[ipaddress] + 1
-	if val, ok := c.IPFSCachedSegments[latest]; !ok {
-		return &strset.Set{}, latest
-	} else {
-		return val, latest
-	}
-}
-
-func (c *IPFSCache) AddRecord(number uint64, representationID string) {
-	if _, ok := c.IPFSCachedSegments[number]; !ok {
-		c.IPFSCachedSegments[number] = strset.New()
+func (c *IPFSCache) AddRecord(segment uint64, quality int) {
+	if _, ok := c.IPFSCachedSegments[segment]; !ok {
+		c.IPFSCachedSegments[segment] = iset.New()
 	}
 
-	c.IPFSCachedSegments[number].Add(representationID)
+	c.IPFSCachedSegments[segment].Add(quality)
 	//	log.Println("Add segment", number, ":", representationID)
 }
 
