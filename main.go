@@ -103,6 +103,11 @@ func preloadNextSegment(clientID string, clientBW float64, ipfscache *IPFSCache,
 		if quality > last {
 			quality = last
 		}
+		if clientBandwidth[clientID] < backEndBandwidth {
+			clientBandwidth[clientID] = clientBandwidth[clientID] * 0.8
+		} else {
+			backEndBandwidth = backEndBandwidth * 0.8
+		}
 	}
 
 	targetSegment, targetQuality := findNextSegment(clientBW, ipfscache, segment+1, quality, backoff)
@@ -248,8 +253,8 @@ func proxyHandle(c *gin.Context) {
 
 	t := time.Now()
 	proxy.ServeHTTP(c.Writer, c.Request)
+	c.Writer.Flush()
 	clientLatestTransmit[clientID] = time.Since(t)
-
 	if ipfscache, ok := ipfsCaches[pathkey]; ok {
 		if ipfscache.AlreadyCachedUrl(editedpath) {
 			var curBW float64 = 10 * 1000 * 1000
@@ -265,6 +270,7 @@ func proxyHandle(c *gin.Context) {
 		}
 		ipfscache.AddRecordFromURL(editedpath)
 	}
+
 }
 
 func main() {
@@ -296,5 +302,10 @@ func main() {
 	r.Any("/*path", proxyHandle)
 	//	r.Any("/*path", pureProxyHandle)
 
-	r.Run(os.Args[2])
+	s := http.Server{
+		Addr:    os.Args[2],
+		Handler: r,
+	}
+	s.SetKeepAlivesEnabled(false)
+	s.ListenAndServe()
 }
