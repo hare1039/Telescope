@@ -103,11 +103,8 @@ func preloadNextSegment(clientID string, clientBW float64, ipfscache *IPFSCache,
 		if quality > last {
 			quality = last
 		}
-		if clientBandwidth[clientID] < backEndBandwidth {
-			clientBandwidth[clientID] = clientBandwidth[clientID] * 0.8
-		} else {
-			backEndBandwidth = backEndBandwidth * 0.8
-		}
+
+		clientBandwidth[clientID] = clientBandwidth[clientID] * 0.8
 	}
 
 	targetSegment, targetQuality := findNextSegment(clientBW, ipfscache, segment+1, quality, backoff)
@@ -173,6 +170,10 @@ func proxyHandle(c *gin.Context) {
 	fullpath := c.Param("path")
 	pathkey := path.Dir(fullpath)
 	clientID := c.Request.Header.Get("clientID")
+	if c.Request.Header.Get("stalled") == "1" {
+		clientBandwidth[clientID] = clientBandwidth[clientID] * 0.5
+		log.Println("Stalled. New BW", clientBandwidth[clientID], backEndBandwidth)
+	}
 	//	frontBW, _ := strconv.ParseFloat(c.Request.Header.Get("frontBW"), 64)
 	frontBW, fOK := clientBandwidth[clientID]
 	if !fOK {
