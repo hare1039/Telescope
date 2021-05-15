@@ -22,7 +22,7 @@ import (
 var remote *url.URL
 var ipfsCaches map[string]*IPFSCache
 var backEndBandwidth float64 = 16 * 1000 * 1000
-var deltaRate float64 = 0.70
+var deltaRate float64 = 0.50
 var IPFSDelay uint64 = 0
 var clientTrace map[string][]int
 var clientLatestTransmit map[string]time.Duration
@@ -121,7 +121,7 @@ func preloadNextSegment(clientID string, clientBW float64, ipfscache *IPFSCache,
 			defer resp.Body.Close()
 			ipfscache.AddRecord(targetSegment, targetQuality)
 
-			if delta.Milliseconds() > 1000 {
+			if delta.Milliseconds() > 800 {
 				currentBandwidthNS := float64(resp.ContentLength*8) / float64(delta.Nanoseconds())
 				curBW := currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
 				updateBackendBandwidth(curBW)
@@ -174,6 +174,7 @@ func proxyHandle(c *gin.Context) {
 		clientBandwidth[clientID] = clientBandwidth[clientID] * 0.5
 		log.Println("Stalled. New BW", clientBandwidth[clientID], backEndBandwidth)
 	}
+	log.Println("Processing request", fullpath)
 	//	frontBW, _ := strconv.ParseFloat(c.Request.Header.Get("frontBW"), 64)
 	frontBW, fOK := clientBandwidth[clientID]
 	if !fOK {
@@ -259,7 +260,7 @@ func proxyHandle(c *gin.Context) {
 	if ipfscache, ok := ipfsCaches[pathkey]; ok {
 		if ipfscache.AlreadyCachedUrl(editedpath) {
 			var curBW float64 = 10 * 1000 * 1000
-			if clientLatestTransmit[clientID].Milliseconds() > 1000 {
+			if clientLatestTransmit[clientID].Milliseconds() > 800 {
 				currentBandwidthNS := float64(c.Writer.Size()*8) / float64(clientLatestTransmit[clientID].Nanoseconds())
 				curBW = currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
 			} else if clientLatestTransmit[clientID].Milliseconds() < 50 {
