@@ -24,12 +24,14 @@ type IPFSCache struct {
 	mpdTree            mpd.MPD
 	SegmentDuration    time.Duration
 	URLMatcher         map[string]Matcher
+	LatestProgress     map[string]uint64
 }
 
 func NewIPFSCache(m *mpd.MPD) *IPFSCache {
 	c := new(IPFSCache)
 	c.IPFSCachedSegments = make(map[uint64]*iset.Set)
 	c.URLMatcher = make(map[string]Matcher)
+	c.LatestProgress = make(map[string]uint64)
 	c.mpdTree = *m
 	c.PrepareURLMatcher()
 	return c
@@ -85,6 +87,15 @@ func (c *IPFSCache) GreatestQuality(segment uint64) int {
 	return max
 }
 
+func (c *IPFSCache) QualitysBandwidth(quality int) float64 {
+	for _, value := range c.URLMatcher {
+		if value.Quality == quality {
+			return value.Bandwidth
+		}
+	}
+	return 0.0
+}
+
 func (c *IPFSCache) FormUrlBySegmentQuality(segment uint64, quality int) string {
 	for prefix, value := range c.URLMatcher {
 		if value.Quality == quality {
@@ -108,21 +119,35 @@ func (c *IPFSCache) ParseSegmentQuality(url string) (uint64, int) {
 	return segment, quality
 }
 
-func (c *IPFSCache) AddRecordFromURL(url string) error {
+func (c *IPFSCache) AddRecordFromURL(url string, clientID string) error {
 	segment, quality := c.ParseSegmentQuality(url)
 	if segment != 0 {
-		c.AddRecord(segment, quality)
+		c.LatestProgress[clientID] = segment
+		c.AddRecord(segment, quality, clientID)
 	}
 	return nil
 }
 
-func (c *IPFSCache) AddRecord(segment uint64, quality int) {
+func (c *IPFSCache) AddRecord(segment uint64, quality int, clientID string) {
 	if _, ok := c.IPFSCachedSegments[segment]; !ok {
 		c.IPFSCachedSegments[segment] = iset.New()
 	}
 
+	if segment != 0 {
+		c.LatestProgress[clientID] = segment
+	}
+
 	c.IPFSCachedSegments[segment].Add(quality)
 	//	log.Println("Add segment", number, ":", representationID)
+}
+
+func (c *IPFSCache) Latest(clientID string) (*iset.Set, uint64) {
+	latest := c.LatestProgress[clientID] + 1
+	if val, ok := c.IPFSCachedSegments[latest]; !ok {
+		return &iset.Set{}, latest
+	} else {
+		return val, latest
+	}
 }
 
 func (c *IPFSCache) Print() {

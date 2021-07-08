@@ -10,21 +10,20 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/oleiade/lane"
 	"github.com/unki2aut/go-mpd"
+	"github.com/unki2aut/go-xsd-types"
 )
 
 var remote *url.URL
 var ipfsCaches map[string]*IPFSCache
-var backEndBandwidth float64 = 16 * 1000 * 1000
+var uncachedThroughput float64 = 16 * 1000 * 1000
 var deltaRate float64 = 0.50
 var IPFSDelay uint64 = 0
-var clientTrace map[string][]int
 var clientLatestTransmit map[string]time.Duration
 var clientBandwidth map[string]float64
 var httpHeadRequests chan func()
@@ -40,164 +39,52 @@ func requestBackend() {
 	}
 }
 
-func updateBackendBandwidth(curBW float64) {
-	backEndBandwidth = deltaRate*backEndBandwidth + (1.0-deltaRate)*curBW
-	//	backEndBandwidth = 16 * 1000 * 1000
-	log.Println("Update backEndBandwidth", int64(backEndBandwidth/1000), "kbits")
-	//log.Println("Current BW", int64(curBW/1000), "kbits")
+func updateUncachedThroughput(curBW float64) {
+	uncachedThroughput = deltaRate*uncachedThroughput + (1.0-deltaRate)*curBW
+	log.Println("Update backEndBandwidth", int64(uncachedThroughput/1000), "kbits")
 }
 
-func findNextSegment(
-	clientBW float64,
-	ipfscache *IPFSCache,
-	segment uint64,
-	requestedQuality int,
-	backingOff bool) (uint64, int) {
-
-	bandwidth := clientBW // = min(clientBW, backEndBandwidthx)
-	if backEndBandwidth < bandwidth {
-		bandwidth = backEndBandwidth
-	}
-	log.Println(int64(clientBW/1000), int64(backEndBandwidth/1000), "kbits")
-
-	advanceQuality := requestedQuality
-	if !backingOff {
-		greatestQuality := ipfscache.GreatestQuality(segment)
-		if advanceQuality > greatestQuality {
-			advanceQuality = greatestQuality + 1
-		}
-	}
-
-	qualityList := make([]int, 0)
-	for _, value := range ipfscache.URLMatcher {
-		qualityList = append(qualityList, value.Quality)
-	}
-
-	sort.Sort(sort.Reverse(sort.IntSlice(qualityList)))
-
-	for _, highestQuality := range qualityList {
-		for _, value := range ipfscache.URLMatcher {
-			if value.Quality == highestQuality &&
-				((value.Bandwidth < bandwidth && !backingOff) || value.Quality == advanceQuality) {
-				if ipfscache.AlreadyCached(segment, value.Quality) {
-					log.Println("Already cached, skip", value.Quality)
-					return findNextSegment(clientBW, ipfscache, segment+1, requestedQuality, false)
-				}
-
-				return segment, value.Quality
-			}
-		}
-	}
-	return segment, requestedQuality
-}
-
-func preloadNextSegment(clientID string, clientBW float64, ipfscache *IPFSCache, fullpath string) {
+func preloadNextSegment(clientID string, ipfscache *IPFSCache, fullpath string) {
 	segment, quality := ipfscache.ParseSegmentQuality(fullpath)
 
-	backoff := false
-	if clientLatestTransmit[clientID] > ipfscache.SegmentDuration {
-		log.Println("Ohno too slow, backing off")
-		backoff = true
-		//		quality = clientTrace[clientID][len(clientTrace[clientID])-1] - 1
-		last := clientTrace[clientID][len(clientTrace[clientID])-1] - 1
-		if quality > last {
-			quality = last
-		}
-
-		clientBandwidth[clientID] = clientBandwidth[clientID] * 0.8
+	if segment == 0 {
+		return
 	}
 
-	targetSegment, targetQuality := findNextSegment(clientBW, ipfscache, segment+1, quality, backoff)
-
+	nextsegment := segment + 1
 	pathkey := path.Dir(fullpath)
-	next := remote.Scheme + "://" + remote.Host + pathkey + "/" + ipfscache.FormUrlBySegmentQuality(targetSegment, targetQuality)
+	next := remote.Scheme + "://" + remote.Host + pathkey + "/" + ipfscache.FormUrlBySegmentQuality(nextsegment, quality)
 
-	log.Println("IPFS Get Segment", targetSegment, "Quality", targetQuality)
+	log.Println("IPFS Get Segment", segment, "Quality", quality)
 	httpHeadRequests <- func() {
 		startReq := time.Now()
 		if resp, err := http.Get(next); err == nil {
 			ioutil.ReadAll(resp.Body)
 			delta := time.Since(startReq)
 			defer resp.Body.Close()
-			ipfscache.AddRecord(targetSegment, targetQuality)
+			ipfscache.AddRecord(nextsegment, quality, clientID)
 
 			if delta.Milliseconds() > 800 {
 				currentBandwidthNS := float64(resp.ContentLength*8) / float64(delta.Nanoseconds())
 				curBW := currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
-				updateBackendBandwidth(curBW)
+				updateUncachedThroughput(curBW)
 			}
 		}
 	}
-}
-
-func findCachedQuality(clientBW float64, ipfscache *IPFSCache, fullpath string) (string, int) {
-	segment, quality := ipfscache.ParseSegmentQuality(fullpath)
-
-	if ipfscache.IPFSCachedSegments[segment] == nil {
-		log.Println("Running late", segment)
-		for len(httpHeadRequests) > 0 {
-			<-httpHeadRequests
-		}
-		log.Println("poping hold requests done")
-
-		return fullpath, quality
-	}
-
-	log.Println("Requested quality", quality)
-	pathkey := path.Dir(fullpath)
-
-	qualityList := make([]int, 0)
-	for _, value := range ipfscache.IPFSCachedSegments[segment].List() {
-		qualityList = append(qualityList, value)
-	}
-
-	sort.Sort(sort.Reverse(sort.IntSlice(qualityList)))
-	log.Println(segment, "Available:", qualityList)
-
-	for _, bestQuality := range qualityList {
-		for prefix, value := range ipfscache.URLMatcher {
-			if bestQuality == value.Quality &&
-				(value.Bandwidth < clientBW) {
-				return pathkey + "/" + prefix + fmt.Sprint(segment) + value.Suffix, value.Quality
-			}
-		}
-	}
-
-	return fullpath, quality
 }
 
 func proxyHandle(c *gin.Context) {
 	fullpath := c.Param("path")
 	pathkey := path.Dir(fullpath)
 	clientID := c.Request.Header.Get("clientID")
-	if c.Request.Header.Get("stalled") == "1" {
-		clientBandwidth[clientID] = clientBandwidth[clientID] * 0.5
-		log.Println("Stalled. New BW", clientBandwidth[clientID], backEndBandwidth)
-	}
 	log.Println("Processing request", fullpath)
-	//	frontBW, _ := strconv.ParseFloat(c.Request.Header.Get("frontBW"), 64)
-	frontBW, fOK := clientBandwidth[clientID]
-	if !fOK {
-		frontBW = 10 * 1000 * 1000
+
+	if _, fOK := clientBandwidth[clientID]; !fOK {
 		clientBandwidth[clientID] = 10 * 1000 * 1000
 	}
 
-	editedpath := fullpath
-
-	var quality int = -1
-
 	if ipfscache, ok := ipfsCaches[pathkey]; ok {
-		preloadNextSegment(clientID, frontBW, ipfscache, fullpath)
-		editedpath, quality = findCachedQuality(frontBW, ipfscache, fullpath)
-	}
-
-	if fullpath != editedpath {
-		log.Println("=>", quality)
-	}
-
-	if strings.Contains(fullpath, "api-special") {
-		c.JSON(200, clientTrace[clientID])
-		return
+		preloadNextSegment(clientID, ipfscache, fullpath)
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(remote)
@@ -208,11 +95,7 @@ func proxyHandle(c *gin.Context) {
 		req.Host = remote.Host
 		req.URL.Scheme = remote.Scheme
 		req.URL.Host = remote.Host
-		req.URL.Path = editedpath
-
-		if quality != -1 {
-			clientTrace[clientID] = append(clientTrace[clientID], quality)
-		}
+		req.URL.Path = fullpath
 	}
 
 	if strings.Contains(fullpath, ".mpd") {
@@ -226,23 +109,101 @@ func proxyHandle(c *gin.Context) {
 				panic(err)
 			}
 
-			mpd := new(mpd.MPD)
-			if err := mpd.Decode(b); err != nil {
+			mpdv := new(mpd.MPD)
+			if err := mpdv.Decode(b); err != nil {
 				log.Println("mpd decode error", err)
 				log.Println(r.Body)
 				return err
 			}
 
 			if _, ok := ipfsCaches[pathkey]; !ok {
-				ipfsCaches[pathkey] = NewIPFSCache(mpd)
+				ipfsCaches[pathkey] = NewIPFSCache(mpdv)
 			}
 
-			buf := bytes.NewBuffer(b)
+			mpdtype := "dynamic"
+			mpdv.Type = &mpdtype
+			mpdv.MinimumUpdatePeriod = &xsd.Duration{Seconds: 1}
+
+			timeZero, _ := xsd.DateTimeFromString("1970-01-01T00:00:00Z")
+			mpdv.AvailabilityStartTime = timeZero
+
+			ipfscache := ipfsCaches[pathkey]
+			_, quality := ipfscache.ParseSegmentQuality(fullpath)
+			clientVideoBandwidth := ipfscache.QualitysBandwidth(quality)
+			cachedSet, latest := ipfscache.Latest(clientID)
+			log.Println("For segment", latest, ":", cachedSet)
+
+			var off uint64 = 0
+			for _, p := range mpdv.Period {
+				for _, adapt := range p.AdaptationSets {
+					var queue []mpd.Representation
+					for i, _ := range adapt.Representations {
+						representation := &adapt.Representations[i]
+						representation.SegmentTemplate.PresentationTimeOffset = &off
+
+						if cachedSet.Has(Stoi(*representation.ID)) &&
+							float64(*representation.Bandwidth) < clientBandwidth[clientID] {
+							queue = append(queue, *representation)
+						}
+					}
+
+					for index, r := range queue {
+						newid := *r.ID + ".0000001"
+						newbw := uint64(uncachedThroughput + float64(index))
+						log.Println("Add", newid, *r.Bandwidth, "=>", uncachedThroughput, newbw)
+
+						adapt.Representations = append(adapt.Representations, mpd.Representation{
+							ID:                 &newid,
+							MimeType:           r.MimeType,
+							Width:              r.Width,
+							Height:             r.Height,
+							FrameRate:          r.FrameRate,
+							Bandwidth:          &newbw,
+							AudioSamplingRate:  r.AudioSamplingRate,
+							Codecs:             r.Codecs,
+							SAR:                r.SAR,
+							ScanType:           r.ScanType,
+							ContentProtections: r.ContentProtections,
+							SegmentTemplate:    r.SegmentTemplate,
+							BaseURL:            r.BaseURL,
+						})
+
+						newidcur := *r.ID + ".0000002"
+						newbwcur := uint64(clientVideoBandwidth + float64(index))
+						log.Println("Add", newidcur, *r.Bandwidth, "=>", newbwcur, clientVideoBandwidth)
+
+						adapt.Representations = append(adapt.Representations, mpd.Representation{
+							ID:                 &newidcur,
+							MimeType:           r.MimeType,
+							Width:              r.Width,
+							Height:             r.Height,
+							FrameRate:          r.FrameRate,
+							Bandwidth:          &newbwcur,
+							AudioSamplingRate:  r.AudioSamplingRate,
+							Codecs:             r.Codecs,
+							SAR:                r.SAR,
+							ScanType:           r.ScanType,
+							ContentProtections: r.ContentProtections,
+							SegmentTemplate:    r.SegmentTemplate,
+							BaseURL:            r.BaseURL,
+						})
+					}
+				}
+			}
+			mpdv.Period[0].Start = &xsd.Duration{}
+
+			newmpd, err := mpdv.Encode()
+			if err != nil {
+				fmt.Println("Encode failed. Returning the original one:", err)
+				return nil
+			}
+
+			buf := bytes.NewBuffer(newmpd)
 			r.Body = ioutil.NopCloser(buf)
 			r.Header["Content-Length"] = []string{fmt.Sprint(buf.Len())}
 			r.Header["Last-Modified"] = []string{time.Now().UTC().Format(http.TimeFormat)}
 			r.Header["Cache-Control"] = []string{"no-cache"}
-
+			//			log.Println("MPD Modified")
 			return nil
 		}
 	}
@@ -258,21 +219,22 @@ func proxyHandle(c *gin.Context) {
 	c.Writer.Flush()
 	clientLatestTransmit[clientID] = time.Since(t)
 	if ipfscache, ok := ipfsCaches[pathkey]; ok {
-		if ipfscache.AlreadyCachedUrl(editedpath) {
-			var curBW float64 = 10 * 1000 * 1000
-			if clientLatestTransmit[clientID].Milliseconds() > 800 {
-				currentBandwidthNS := float64(c.Writer.Size()*8) / float64(clientLatestTransmit[clientID].Nanoseconds())
-				curBW = currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
-			} else if clientLatestTransmit[clientID].Milliseconds() < 50 {
-				curBW = 16 * 1000 * 1000
-			}
+		var curBW float64 = 10 * 1000 * 1000
+		if clientLatestTransmit[clientID].Milliseconds() > 800 {
+			currentBandwidthNS := float64(c.Writer.Size()*8) / float64(clientLatestTransmit[clientID].Nanoseconds())
+			curBW = currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
+		} else if clientLatestTransmit[clientID].Milliseconds() < 50 {
+			curBW = 16 * 1000 * 1000
+		}
 
+		if ipfscache.AlreadyCachedUrl(fullpath) {
 			clientBandwidth[clientID] = deltaRate*clientBandwidth[clientID] + (1.0-deltaRate)*curBW
 			log.Println("Update clientBandwidth", int64(clientBandwidth[clientID]/1000), "kbits")
+		} else {
+			updateUncachedThroughput(curBW)
 		}
-		ipfscache.AddRecordFromURL(editedpath)
+		ipfscache.AddRecordFromURL(fullpath, clientID)
 	}
-
 }
 
 func main() {
@@ -288,7 +250,6 @@ func main() {
 
 	ipfsCaches = make(map[string]*IPFSCache)
 	httpHeadRequests = make(chan func(), 1000)
-	clientTrace = make(map[string][]int)
 	clientLatestTransmit = make(map[string]time.Duration)
 	clientBandwidth = make(map[string]float64)
 	//	busyChan = make(chan emptyT, 100000)
