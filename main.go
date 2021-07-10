@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -45,12 +46,30 @@ func preloadNextSegment(clientID string, ipfscache *IPFSCache, fullpath string) 
 		return
 	}
 
+	qualityList := make([]int, 0)
+	for _, value := range ipfscache.URLMatcher {
+		qualityList = append(qualityList, value.Quality)
+	}
+
+	sort.Sort(sort.Reverse(sort.IntSlice(qualityList)))
+
+FindBestQuality:
+	for _, highestQuality := range qualityList {
+		for _, value := range ipfscache.URLMatcher {
+			if value.Quality == highestQuality &&
+				value.Bandwidth < clientThroughput[clientID].Cached {
+				quality = value.Quality
+				break FindBestQuality
+			}
+		}
+	}
+
 	nextsegment := segment + 1
 	pathkey := path.Dir(fullpath)
 	next := remote.Scheme + "://" + remote.Host + pathkey + "/" + ipfscache.FormUrlBySegmentQuality(nextsegment, quality)
 
-	log.Println("IPFS Get Segment", segment, "Quality", quality)
 	httpHeadRequests <- func() {
+		log.Println("Prefetch Segment", segment, "Quality", quality)
 		if resp, err := http.Get(next); err == nil {
 			ioutil.ReadAll(resp.Body)
 			defer resp.Body.Close()
@@ -201,15 +220,12 @@ func proxyHandle(c *gin.Context) {
 		}
 	}()
 
-	//	if ipfscache, ok := ipfsCaches[pathkey]; ok {
-	//	preloadNextSegment(clientID, ipfscache, fullpath)
-	//}
-
 	t := time.Now()
 	proxy.ServeHTTP(c.Writer, c.Request)
 	c.Writer.Flush()
 	clientLatestTransmit[clientID] = time.Since(t)
 	if ipfscache, ok := ipfsCaches[pathkey]; ok && c.Writer.Size() > 400000 {
+		preloadNextSegment(clientID, ipfscache, fullpath)
 		isCached := ipfscache.AlreadyCachedUrl(fullpath)
 		ipfscache.AddRecordFromURL(fullpath, clientID)
 
