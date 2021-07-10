@@ -14,34 +14,28 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/oleiade/lane"
 	"github.com/unki2aut/go-mpd"
 	"github.com/unki2aut/go-xsd-types"
 )
 
 var remote *url.URL
 var ipfsCaches map[string]*IPFSCache
-var uncachedThroughput float64 = 16 * 1000 * 1000
 var deltaRate float64 = 0.50
 var IPFSDelay uint64 = 0
 var clientLatestTransmit map[string]time.Duration
-var clientBandwidth map[string]float64
 var httpHeadRequests chan func()
 
-type emptyT struct{}
+type ClientThroughput struct {
+	Uncached float64
+	Cached   float64
+}
 
-var busyChan chan emptyT
-var busyQueue *lane.Deque
+var clientThroughput map[string]ClientThroughput
 
 func requestBackend() {
 	for req := range httpHeadRequests {
 		req()
 	}
-}
-
-func updateUncachedThroughput(curBW float64) {
-	uncachedThroughput = deltaRate*uncachedThroughput + (1.0-deltaRate)*curBW
-	log.Println("Update backEndBandwidth", int64(uncachedThroughput/1000), "kbits")
 }
 
 func preloadNextSegment(clientID string, ipfscache *IPFSCache, fullpath string) {
@@ -57,18 +51,10 @@ func preloadNextSegment(clientID string, ipfscache *IPFSCache, fullpath string) 
 
 	log.Println("IPFS Get Segment", segment, "Quality", quality)
 	httpHeadRequests <- func() {
-		startReq := time.Now()
 		if resp, err := http.Get(next); err == nil {
 			ioutil.ReadAll(resp.Body)
-			delta := time.Since(startReq)
 			defer resp.Body.Close()
 			ipfscache.AddRecord(nextsegment, quality, clientID)
-
-			if delta.Milliseconds() > 800 {
-				currentBandwidthNS := float64(resp.ContentLength*8) / float64(delta.Nanoseconds())
-				curBW := currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
-				updateUncachedThroughput(curBW)
-			}
 		}
 	}
 }
@@ -79,12 +65,11 @@ func proxyHandle(c *gin.Context) {
 	clientID := c.Request.Header.Get("clientID")
 	log.Println("Processing request", fullpath)
 
-	if _, fOK := clientBandwidth[clientID]; !fOK {
-		clientBandwidth[clientID] = 10 * 1000 * 1000
-	}
-
-	if ipfscache, ok := ipfsCaches[pathkey]; ok {
-		preloadNextSegment(clientID, ipfscache, fullpath)
+	if _, ok := clientThroughput[clientID]; !ok {
+		clientThroughput[clientID] = ClientThroughput{
+			Cached:   10.0 * 1000 * 1000,
+			Uncached: 10.0 * 1000 * 1000,
+		}
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(remote)
@@ -128,8 +113,7 @@ func proxyHandle(c *gin.Context) {
 			mpdv.AvailabilityStartTime = timeZero
 
 			ipfscache := ipfsCaches[pathkey]
-			_, quality := ipfscache.ParseSegmentQuality(fullpath)
-			clientVideoBandwidth := ipfscache.QualitysBandwidth(quality)
+			clientVideoBandwidth := ipfscache.QualitysBandwidth(ipfscache.PrevReqQuality[clientID])
 			cachedSet, latest := ipfscache.Latest(clientID)
 			log.Println("For segment", latest, ":", cachedSet)
 
@@ -142,51 +126,54 @@ func proxyHandle(c *gin.Context) {
 						representation.SegmentTemplate.PresentationTimeOffset = &off
 
 						if cachedSet.Has(Stoi(*representation.ID)) &&
-							float64(*representation.Bandwidth) < clientBandwidth[clientID] {
+							float64(*representation.Bandwidth) <= clientThroughput[clientID].Cached {
 							queue = append(queue, *representation)
 						}
 					}
 
 					for index, r := range queue {
-						newid := *r.ID + ".0000001"
-						newbw := uint64(uncachedThroughput + float64(index))
-						log.Println("Add", newid, *r.Bandwidth, "=>", uncachedThroughput, newbw)
+						newbw := uint64(clientThroughput[clientID].Uncached + float64(index))
+						if newbw < *r.Bandwidth {
+							newid := *r.ID + ".0000001"
+							log.Println("Add", newid, *r.Bandwidth, "=>", clientThroughput[clientID].Uncached, newbw)
+							adapt.Representations = append(adapt.Representations, mpd.Representation{
+								ID:                 &newid,
+								MimeType:           r.MimeType,
+								Width:              r.Width,
+								Height:             r.Height,
+								FrameRate:          r.FrameRate,
+								Bandwidth:          &newbw,
+								AudioSamplingRate:  r.AudioSamplingRate,
+								Codecs:             r.Codecs,
+								SAR:                r.SAR,
+								ScanType:           r.ScanType,
+								ContentProtections: r.ContentProtections,
+								SegmentTemplate:    r.SegmentTemplate,
+								BaseURL:            r.BaseURL,
+							})
+						}
 
-						adapt.Representations = append(adapt.Representations, mpd.Representation{
-							ID:                 &newid,
-							MimeType:           r.MimeType,
-							Width:              r.Width,
-							Height:             r.Height,
-							FrameRate:          r.FrameRate,
-							Bandwidth:          &newbw,
-							AudioSamplingRate:  r.AudioSamplingRate,
-							Codecs:             r.Codecs,
-							SAR:                r.SAR,
-							ScanType:           r.ScanType,
-							ContentProtections: r.ContentProtections,
-							SegmentTemplate:    r.SegmentTemplate,
-							BaseURL:            r.BaseURL,
-						})
-
-						newidcur := *r.ID + ".0000002"
 						newbwcur := uint64(clientVideoBandwidth + float64(index))
-						log.Println("Add", newidcur, *r.Bandwidth, "=>", newbwcur, clientVideoBandwidth)
+						if newbwcur < *r.Bandwidth {
+							newidcur := *r.ID + ".0000002"
+							log.Println("Add", newidcur, *r.Bandwidth, "=>", newbwcur, clientVideoBandwidth)
 
-						adapt.Representations = append(adapt.Representations, mpd.Representation{
-							ID:                 &newidcur,
-							MimeType:           r.MimeType,
-							Width:              r.Width,
-							Height:             r.Height,
-							FrameRate:          r.FrameRate,
-							Bandwidth:          &newbwcur,
-							AudioSamplingRate:  r.AudioSamplingRate,
-							Codecs:             r.Codecs,
-							SAR:                r.SAR,
-							ScanType:           r.ScanType,
-							ContentProtections: r.ContentProtections,
-							SegmentTemplate:    r.SegmentTemplate,
-							BaseURL:            r.BaseURL,
-						})
+							adapt.Representations = append(adapt.Representations, mpd.Representation{
+								ID:                 &newidcur,
+								MimeType:           r.MimeType,
+								Width:              r.Width,
+								Height:             r.Height,
+								FrameRate:          r.FrameRate,
+								Bandwidth:          &newbwcur,
+								AudioSamplingRate:  r.AudioSamplingRate,
+								Codecs:             r.Codecs,
+								SAR:                r.SAR,
+								ScanType:           r.ScanType,
+								ContentProtections: r.ContentProtections,
+								SegmentTemplate:    r.SegmentTemplate,
+								BaseURL:            r.BaseURL,
+							})
+						}
 					}
 				}
 			}
@@ -214,26 +201,30 @@ func proxyHandle(c *gin.Context) {
 		}
 	}()
 
+	//	if ipfscache, ok := ipfsCaches[pathkey]; ok {
+	//	preloadNextSegment(clientID, ipfscache, fullpath)
+	//}
+
 	t := time.Now()
 	proxy.ServeHTTP(c.Writer, c.Request)
 	c.Writer.Flush()
 	clientLatestTransmit[clientID] = time.Since(t)
-	if ipfscache, ok := ipfsCaches[pathkey]; ok {
-		var curBW float64 = 10 * 1000 * 1000
-		if clientLatestTransmit[clientID].Milliseconds() > 800 {
-			currentBandwidthNS := float64(c.Writer.Size()*8) / float64(clientLatestTransmit[clientID].Nanoseconds())
-			curBW = currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
-		} else if clientLatestTransmit[clientID].Milliseconds() < 50 {
-			curBW = 16 * 1000 * 1000
-		}
-
-		if ipfscache.AlreadyCachedUrl(fullpath) {
-			clientBandwidth[clientID] = deltaRate*clientBandwidth[clientID] + (1.0-deltaRate)*curBW
-			log.Println("Update clientBandwidth", int64(clientBandwidth[clientID]/1000), "kbits")
-		} else {
-			updateUncachedThroughput(curBW)
-		}
+	if ipfscache, ok := ipfsCaches[pathkey]; ok && c.Writer.Size() > 400000 {
+		isCached := ipfscache.AlreadyCachedUrl(fullpath)
 		ipfscache.AddRecordFromURL(fullpath, clientID)
+
+		currentBandwidthNS := float64(c.Writer.Size()*8) / float64(clientLatestTransmit[clientID].Nanoseconds())
+		curBW := currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
+
+		var ct = clientThroughput[clientID]
+		if isCached {
+			ct.Cached = deltaRate*ct.Cached + (1.0-deltaRate)*curBW
+			log.Println("Update cachedThroughput", int64(ct.Cached/1000), "kbits")
+		} else {
+			ct.Uncached = deltaRate*ct.Uncached + (1.0-deltaRate)*curBW
+			log.Println("Update uncachedThroughout", int64(ct.Uncached/1000), "kbits")
+		}
+		clientThroughput[clientID] = ct
 	}
 }
 
@@ -251,9 +242,7 @@ func main() {
 	ipfsCaches = make(map[string]*IPFSCache)
 	httpHeadRequests = make(chan func(), 1000)
 	clientLatestTransmit = make(map[string]time.Duration)
-	clientBandwidth = make(map[string]float64)
-	//	busyChan = make(chan emptyT, 100000)
-	// busyQueue = lane.NewDeque()
+	clientThroughput = make(map[string]ClientThroughput)
 
 	go requestBackend()
 

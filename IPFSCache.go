@@ -25,6 +25,7 @@ type IPFSCache struct {
 	SegmentDuration    time.Duration
 	URLMatcher         map[string]Matcher
 	LatestProgress     map[string]uint64
+	PrevReqQuality     map[string]int
 }
 
 func NewIPFSCache(m *mpd.MPD) *IPFSCache {
@@ -32,6 +33,7 @@ func NewIPFSCache(m *mpd.MPD) *IPFSCache {
 	c.IPFSCachedSegments = make(map[uint64]*iset.Set)
 	c.URLMatcher = make(map[string]Matcher)
 	c.LatestProgress = make(map[string]uint64)
+	c.PrevReqQuality = make(map[string]int)
 	c.mpdTree = *m
 	c.PrepareURLMatcher()
 	return c
@@ -135,6 +137,7 @@ func (c *IPFSCache) AddRecord(segment uint64, quality int, clientID string) {
 
 	if segment != 0 {
 		c.LatestProgress[clientID] = segment
+		c.PrevReqQuality[clientID] = quality
 	}
 
 	c.IPFSCachedSegments[segment].Add(quality)
