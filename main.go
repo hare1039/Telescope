@@ -234,6 +234,47 @@ func proxyHandle(c *gin.Context) {
 	}
 }
 
+func pureProxyHandle(c *gin.Context) {
+	fullpath := c.Param("path")
+
+	proxy := httputil.NewSingleHostReverseProxy(remote)
+	proxy.Director = func(req *http.Request) {
+		req.Header = c.Request.Header
+		delete(req.Header, "If-Modified-Since")
+		delete(req.Header, "If-None-Match")
+		req.Host = remote.Host
+		req.URL.Scheme = remote.Scheme
+		req.URL.Host = remote.Host
+		req.URL.Path = fullpath
+	}
+
+	requestTimeout := 15 * time.Second
+	if UnlimitedTimeout {
+		requestTimeout = 2 * 60 * time.Second
+	}
+
+	transferDone := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Println("handler recovery", r)
+			}
+		}()
+
+		proxy.ServeHTTP(c.Writer, c.Request)
+		transferDone <- struct{}{}
+	}()
+
+	select {
+	case <-transferDone:
+		close(transferDone)
+	case <-time.After(requestTimeout):
+		c.Request.Body.Close()
+	}
+
+	c.Writer.Flush()
+}
+
 func settings(c *gin.Context) {
 	if c.PostForm("timeout") == "1" {
 		UnlimitedTimeout = true
@@ -265,9 +306,9 @@ func main() {
 	//		FrontendBandwidthEstimate(c)
 	//	})
 
-	r.GET("/*path", proxyHandle)
+	//	r.GET("/*path", proxyHandle)
 	r.POST("/settings", settings)
-	//	r.Any("/*path", pureProxyHandle)
+	r.GET("/*path", pureProxyHandle)
 
 	s := http.Server{
 		Addr:    os.Args[2],
