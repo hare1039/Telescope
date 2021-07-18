@@ -203,7 +203,7 @@ func proxyHandle(c *gin.Context) {
 
 	requestTimeout := 15 * time.Second
 	if UnlimitedTimeout {
-		requestTimeout = 600 * time.Second
+		requestTimeout = 2 * 60 * time.Second
 	}
 	select {
 	case <-transferDone:
