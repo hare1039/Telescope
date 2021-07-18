@@ -24,7 +24,6 @@ var remote *url.URL
 var ipfsCaches map[string]*IPFSCache
 var deltaRate float64 = 0.50
 var IPFSDelay uint64 = 0
-var clientLatestTransmit map[string]time.Duration
 var httpHeadRequests chan func()
 var UnlimitedTimeout bool
 
@@ -214,12 +213,12 @@ func proxyHandle(c *gin.Context) {
 	}
 
 	c.Writer.Flush()
-	clientLatestTransmit[clientID] = time.Since(t)
+	transferTime := time.Since(t)
 	if ipfscache, ok := ipfsCaches[pathkey]; ok && c.Writer.Size() > 400000 {
 		preloadNextSegment(clientID, ipfscache, fullpath)
 		isCached := ipfscache.AlreadyCachedUrl(fullpath)
 
-		currentBandwidthNS := float64(c.Writer.Size()*8) / float64(clientLatestTransmit[clientID].Nanoseconds())
+		currentBandwidthNS := float64(c.Writer.Size()*8) / float64(transferTime.Nanoseconds())
 		curBW := currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
 
 		var ct = clientThroughput[clientID]
@@ -257,7 +256,6 @@ func main() {
 
 	ipfsCaches = make(map[string]*IPFSCache)
 	httpHeadRequests = make(chan func(), 1000)
-	clientLatestTransmit = make(map[string]time.Duration)
 	clientThroughput = make(map[string]ClientThroughput)
 
 	go requestBackend()
