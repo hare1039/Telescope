@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ var deltaRate float64 = 0.50
 var IPFSDelay uint64 = 0
 var clientLatestTransmit map[string]time.Duration
 var httpHeadRequests chan func()
+var UnlimitedTimeout bool
 
 type ClientThroughput struct {
 	Uncached float64
@@ -40,6 +42,7 @@ func requestBackend() {
 }
 
 func preloadNextSegment(clientID string, ipfscache *IPFSCache, fullpath string) {
+	return
 	segment, quality := ipfscache.ParseSegmentQuality(fullpath)
 
 	if segment == 0 {
@@ -81,12 +84,13 @@ FindBestQuality:
 func proxyHandle(c *gin.Context) {
 	fullpath := c.Param("path")
 	pathkey := path.Dir(fullpath)
+	pathname := filepath.Base(fullpath)
 	clientID := c.Request.Header.Get("clientID")
-	log.Println("Processing request", fullpath)
+	log.Println("Processing request", pathname)
 
 	if _, ok := clientThroughput[clientID]; !ok {
 		clientThroughput[clientID] = ClientThroughput{
-			Cached:   10.0 * 1000 * 1000,
+			Cached:   15.0 * 1000 * 1000,
 			Uncached: 10.0 * 1000 * 1000,
 		}
 	}
@@ -102,7 +106,7 @@ func proxyHandle(c *gin.Context) {
 		req.URL.Path = fullpath
 	}
 
-	if strings.Contains(fullpath, ".mpd") {
+	if strings.Contains(pathname, ".mpd") {
 		proxy.ModifyResponse = func(r *http.Response) error {
 			if r.StatusCode != 200 {
 				log.Println(r)
@@ -132,66 +136,28 @@ func proxyHandle(c *gin.Context) {
 			mpdv.AvailabilityStartTime = timeZero
 
 			ipfscache := ipfsCaches[pathkey]
-			clientVideoBandwidth := ipfscache.QualitysBandwidth(ipfscache.PrevReqQuality[clientID])
+			//			clientVideoBandwidth := ipfscache.QualitysBandwidth(ipfscache.PrevReqQuality[clientID])
 			cachedSet, latest := ipfscache.Latest(clientID)
 			log.Println("For segment", latest, ":", cachedSet)
 
 			var off uint64 = 0
 			for _, p := range mpdv.Period {
 				for _, adapt := range p.AdaptationSets {
-					var queue []mpd.Representation
 					for i, _ := range adapt.Representations {
 						representation := &adapt.Representations[i]
 						representation.SegmentTemplate.PresentationTimeOffset = &off
 
-						if cachedSet.Has(Stoi(*representation.ID)) &&
-							float64(*representation.Bandwidth) <= clientThroughput[clientID].Cached {
-							queue = append(queue, *representation)
-						}
-					}
+						if cachedSet.Has(Stoi(*representation.ID)) {
+							// DownloadTime / MPD_BW = AbrLimitTime / NEW_BW
+							size := float64(*representation.SegmentTemplate.Duration) * float64(*representation.Bandwidth)
+							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
 
-					for index, r := range queue {
-						newbw := uint64(clientThroughput[clientID].Uncached + float64(index))
-						if newbw < *r.Bandwidth {
-							newid := *r.ID + ".0000001"
-							log.Println("Add", newid, *r.Bandwidth, "=>", clientThroughput[clientID].Uncached, newbw)
-							adapt.Representations = append(adapt.Representations, mpd.Representation{
-								ID:                 &newid,
-								MimeType:           r.MimeType,
-								Width:              r.Width,
-								Height:             r.Height,
-								FrameRate:          r.FrameRate,
-								Bandwidth:          &newbw,
-								AudioSamplingRate:  r.AudioSamplingRate,
-								Codecs:             r.Codecs,
-								SAR:                r.SAR,
-								ScanType:           r.ScanType,
-								ContentProtections: r.ContentProtections,
-								SegmentTemplate:    r.SegmentTemplate,
-								BaseURL:            r.BaseURL,
-							})
-						}
-
-						newbwcur := uint64(clientVideoBandwidth + float64(index))
-						if newbwcur < *r.Bandwidth {
-							newidcur := *r.ID + ".0000002"
-							log.Println("Add", newidcur, *r.Bandwidth, "=>", newbwcur, clientVideoBandwidth)
-
-							adapt.Representations = append(adapt.Representations, mpd.Representation{
-								ID:                 &newidcur,
-								MimeType:           r.MimeType,
-								Width:              r.Width,
-								Height:             r.Height,
-								FrameRate:          r.FrameRate,
-								Bandwidth:          &newbwcur,
-								AudioSamplingRate:  r.AudioSamplingRate,
-								Codecs:             r.Codecs,
-								SAR:                r.SAR,
-								ScanType:           r.ScanType,
-								ContentProtections: r.ContentProtections,
-								SegmentTemplate:    r.SegmentTemplate,
-								BaseURL:            r.BaseURL,
-							})
+							log.Println("Rewrite bw with rate", rate)
+							if rate > 1.0 {
+								log.Println("skip larger rewrite")
+							} else {
+								*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+							}
 						}
 					}
 				}
@@ -220,14 +186,38 @@ func proxyHandle(c *gin.Context) {
 		}
 	}()
 
-	t := time.Now()
-	proxy.ServeHTTP(c.Writer, c.Request)
+	var t time.Time
+
+	transferDone := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Println(pathname, "handler recovery", r)
+			}
+		}()
+
+		t = time.Now()
+		proxy.ServeHTTP(c.Writer, c.Request)
+		transferDone <- struct{}{}
+	}()
+
+	requestTimeout := 15 * time.Second
+	if UnlimitedTimeout {
+		requestTimeout = 600 * time.Second
+	}
+	select {
+	case <-transferDone:
+		close(transferDone)
+	case <-time.After(requestTimeout):
+		log.Println(pathname, "trying close")
+		c.Request.Body.Close()
+	}
+
 	c.Writer.Flush()
 	clientLatestTransmit[clientID] = time.Since(t)
 	if ipfscache, ok := ipfsCaches[pathkey]; ok && c.Writer.Size() > 400000 {
 		preloadNextSegment(clientID, ipfscache, fullpath)
 		isCached := ipfscache.AlreadyCachedUrl(fullpath)
-		ipfscache.AddRecordFromURL(fullpath, clientID)
 
 		currentBandwidthNS := float64(c.Writer.Size()*8) / float64(clientLatestTransmit[clientID].Nanoseconds())
 		curBW := currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
@@ -241,7 +231,17 @@ func proxyHandle(c *gin.Context) {
 			log.Println("Update uncachedThroughout", int64(ct.Uncached/1000), "kbits")
 		}
 		clientThroughput[clientID] = ct
+		ipfscache.AddRecordFromURL(fullpath, clientID)
 	}
+}
+
+func settings(c *gin.Context) {
+	if c.PostForm("timeout") == "1" {
+		UnlimitedTimeout = true
+	} else {
+		UnlimitedTimeout = false
+	}
+	log.Println("set unlimited timeout to", UnlimitedTimeout)
 }
 
 func main() {
@@ -267,7 +267,8 @@ func main() {
 	//		FrontendBandwidthEstimate(c)
 	//	})
 
-	r.Any("/*path", proxyHandle)
+	r.GET("/*path", proxyHandle)
+	r.POST("/settings", settings)
 	//	r.Any("/*path", pureProxyHandle)
 
 	s := http.Server{

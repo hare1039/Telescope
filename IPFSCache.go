@@ -6,6 +6,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/scylladb/go-set/iset"
@@ -21,6 +22,7 @@ type Matcher struct {
 
 type IPFSCache struct {
 	IPFSCachedSegments map[uint64]*iset.Set
+	IPFSCacheMutex     sync.Mutex
 	mpdTree            mpd.MPD
 	SegmentDuration    time.Duration
 	URLMatcher         map[string]Matcher
@@ -69,6 +71,8 @@ func (c *IPFSCache) AlreadyCachedUrl(url string) bool {
 }
 
 func (c *IPFSCache) AlreadyCached(segment uint64, quality int) bool {
+	c.IPFSCacheMutex.Lock()
+	defer c.IPFSCacheMutex.Unlock()
 	if segment == 0 || c.IPFSCachedSegments[segment] == nil {
 		return false
 	}
@@ -124,13 +128,14 @@ func (c *IPFSCache) ParseSegmentQuality(url string) (uint64, int) {
 func (c *IPFSCache) AddRecordFromURL(url string, clientID string) error {
 	segment, quality := c.ParseSegmentQuality(url)
 	if segment != 0 {
-		c.LatestProgress[clientID] = segment
 		c.AddRecord(segment, quality, clientID)
 	}
 	return nil
 }
 
 func (c *IPFSCache) AddRecord(segment uint64, quality int, clientID string) {
+	c.IPFSCacheMutex.Lock()
+	defer c.IPFSCacheMutex.Unlock()
 	if _, ok := c.IPFSCachedSegments[segment]; !ok {
 		c.IPFSCachedSegments[segment] = iset.New()
 	}
