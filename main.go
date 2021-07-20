@@ -25,7 +25,7 @@ var ipfsCaches map[string]*IPFSCache
 var deltaRate float64 = 0.50
 var IPFSDelay uint64 = 0
 var httpHeadRequests chan func()
-var UnlimitedTimeout bool
+var SetupMode bool
 
 type ClientThroughput struct {
 	Uncached float64
@@ -41,7 +41,9 @@ func requestBackend() {
 }
 
 func preloadNextSegment(clientID string, ipfscache *IPFSCache, fullpath string) {
-	return
+	if SetupMode {
+		return
+	}
 	segment, quality := ipfscache.ParseSegmentQuality(fullpath)
 
 	if segment == 0 {
@@ -201,7 +203,7 @@ func proxyHandle(c *gin.Context) {
 	}()
 
 	requestTimeout := 15 * time.Second
-	if UnlimitedTimeout {
+	if SetupMode {
 		requestTimeout = 2 * 60 * time.Second
 	}
 	select {
@@ -236,11 +238,11 @@ func proxyHandle(c *gin.Context) {
 
 func settings(c *gin.Context) {
 	if c.PostForm("timeout") == "1" {
-		UnlimitedTimeout = true
+		SetupMode = true
 	} else {
-		UnlimitedTimeout = false
+		SetupMode = false
 	}
-	log.Println("set unlimited timeout to", UnlimitedTimeout)
+	log.Println("set SetupMode to", SetupMode)
 }
 
 func main() {
@@ -257,6 +259,7 @@ func main() {
 	ipfsCaches = make(map[string]*IPFSCache)
 	httpHeadRequests = make(chan func(), 1000)
 	clientThroughput = make(map[string]ClientThroughput)
+	SetupMode = false
 
 	go requestBackend()
 
