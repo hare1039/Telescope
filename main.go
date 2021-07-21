@@ -151,11 +151,11 @@ func proxyHandle(c *gin.Context) {
 						if cachedSet.Has(Stoi(*representation.ID)) {
 							// DownloadTime / MPD_BW = AbrLimitTime / NEW_BW
 							size := float64(*representation.SegmentTemplate.Duration) * float64(*representation.Bandwidth)
-							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
+							rate := (size / clientThroughput[clientID].Uncached) / (size / clientThroughput[clientID].Cached)
 
 							log.Println("Rewrite bw with rate", rate)
-							if rate > 1.0 {
-								log.Println("skip larger rewrite")
+							if rate < 1.0 {
+								log.Println("skip smaller rewrite")
 							} else {
 								*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
 							}
