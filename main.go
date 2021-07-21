@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/unki2aut/go-mpd"
+	"github.com/hare1039/go-mpd"
 	"github.com/unki2aut/go-xsd-types"
 )
 
@@ -148,13 +148,13 @@ func proxyHandle(c *gin.Context) {
 						representation := &adapt.Representations[i]
 						representation.SegmentTemplate.PresentationTimeOffset = &off
 
-						if !cachedSet.Has(Stoi(*representation.ID)) {
+						if cachedSet.Has(Stoi(*representation.ID)) {
 							// DownloadTime / MPD_BW = AbrLimitTime / NEW_BW
 							size := float64(*representation.SegmentTemplate.Duration) * float64(*representation.Bandwidth)
-							rate := (size / clientThroughput[clientID].Uncached) / (size / clientThroughput[clientID].Cached)
+							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
 
 							log.Println("Rewrite bw with rate", rate)
-							if rate < 1.0 {
+							if rate > 1.0 {
 								log.Println("skip larger rewrite")
 							} else {
 								*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)

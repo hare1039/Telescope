@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hare1039/go-mpd"
 	"github.com/scylladb/go-set/iset"
-	"github.com/unki2aut/go-mpd"
 )
 
 type Matcher struct {
