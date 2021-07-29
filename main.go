@@ -26,6 +26,8 @@ var deltaRate float64 = 0.50
 var IPFSDelay uint64 = 0
 var httpHeadRequests chan func()
 var SetupMode bool
+var MPDPolicy string
+var PrefetchOff bool
 
 type ClientThroughput struct {
 	Uncached float64
@@ -41,7 +43,7 @@ func requestBackend() {
 }
 
 func preloadNextSegment(clientID string, ipfscache *IPFSCache, fullpath string) {
-	if SetupMode {
+	if SetupMode || PrefetchOff {
 		return
 	}
 	segment, quality := ipfscache.ParseSegmentQuality(fullpath)
@@ -131,7 +133,7 @@ func proxyHandle(c *gin.Context) {
 
 			mpdtype := "dynamic"
 			mpdv.Type = &mpdtype
-			mpdv.MinimumUpdatePeriod = &xsd.Duration{Seconds: 1}
+			mpdv.MinimumUpdatePeriod = &xsd.Duration{Seconds: 5}
 
 			timeZero, _ := xsd.DateTimeFromString("1970-01-01T00:00:00Z")
 			mpdv.AvailabilityStartTime = timeZero
@@ -148,17 +150,33 @@ func proxyHandle(c *gin.Context) {
 						representation := &adapt.Representations[i]
 						representation.SegmentTemplate.PresentationTimeOffset = &off
 
-						if cachedSet.Has(Stoi(*representation.ID)) {
-							// DownloadTime / MPD_BW = AbrLimitTime / NEW_BW
-							size := float64(*representation.SegmentTemplate.Duration) * float64(*representation.Bandwidth)
-							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
+						size := float64(*representation.SegmentTemplate.Duration) * float64(*representation.Bandwidth)
+						// DownloadTime / MPD_BW = AbrLimitTime / NEW_BW
 
-							log.Println("Rewrite bw with rate", rate)
-							if rate > 1.0 {
-								log.Println("skip larger rewrite")
-							} else {
-								*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+						if MPDPolicy == "CACHEBASED" {
+							rate := (size / clientThroughput[clientID].Uncached) / (size / clientThroughput[clientID].Cached)
+							if !cachedSet.Has(Stoi(*representation.ID)) {
+								if rate < 1.0 {
+									log.Println("skip smaller rewrite", rate)
+								} else {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+								}
 							}
+						} else if MPDPolicy == "UNCACHEBASED" {
+							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
+							if cachedSet.Has(Stoi(*representation.ID)) {
+								if rate > 1.0 {
+									log.Println("skip greater rewrite", rate)
+								} else {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+								}
+							}
+						} else if MPDPolicy == "UNCHANGE" {
+							// skip rewrite for debugging purpose
+						} else {
+							log.Println("ERROR!!!RRRRRRRRRR: Unknown policy:", MPDPolicy)
 						}
 					}
 				}
@@ -204,7 +222,7 @@ func proxyHandle(c *gin.Context) {
 
 	requestTimeout := 15 * time.Second
 	if SetupMode {
-		requestTimeout = 2 * 60 * time.Second
+		requestTimeout = 60 * time.Second
 	}
 	select {
 	case <-transferDone:
@@ -237,12 +255,18 @@ func proxyHandle(c *gin.Context) {
 }
 
 func settings(c *gin.Context) {
-	if c.PostForm("timeout") == "1" {
-		SetupMode = true
-	} else {
-		SetupMode = false
+	if t := c.PostForm("setup"); t != "" {
+		SetupMode = t == "1"
+		log.Println("set SetupMode to", SetupMode)
 	}
-	log.Println("set SetupMode to", SetupMode)
+	if p := c.PostForm("policy"); p != "" {
+		MPDPolicy = p
+		log.Println("set MPDPolicy to", MPDPolicy)
+	}
+	if pf := c.PostForm("prefetch"); pf != "" {
+		PrefetchOff = pf == "0"
+		log.Println("set PrefetchOff to", PrefetchOff)
+	}
 }
 
 func main() {
@@ -260,6 +284,7 @@ func main() {
 	httpHeadRequests = make(chan func(), 1000)
 	clientThroughput = make(map[string]ClientThroughput)
 	SetupMode = false
+	MPDPolicy = "UNCHANGE"
 
 	go requestBackend()
 
