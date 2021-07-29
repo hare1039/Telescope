@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -26,8 +27,9 @@ var deltaRate float64 = 0.50
 var IPFSDelay uint64 = 0
 var httpHeadRequests chan func()
 var SetupMode bool
-var MPDPolicy string
+var MPDMainPolicy string
 var PrefetchOff bool
+var requestHighQuality bool
 
 type ClientThroughput struct {
 	Uncached float64
@@ -110,6 +112,15 @@ func proxyHandle(c *gin.Context) {
 	}
 
 	if strings.Contains(pathname, ".mpd") {
+		MPDPolicy := MPDMainPolicy
+		if MPDPolicy == "DYNAMIC" {
+			if requestHighQuality {
+				MPDPolicy = "CACHEBASED"
+			} else {
+				MPDPolicy = "UNCACHEBASED"
+			}
+		}
+
 		proxy.ModifyResponse = func(r *http.Response) error {
 			if r.StatusCode != 200 {
 				log.Println(r)
@@ -242,6 +253,8 @@ func proxyHandle(c *gin.Context) {
 		curBW := currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
 
 		var ct = clientThroughput[clientID]
+		requestHighQuality = math.Abs(curBW-ct.Cached) < math.Abs(curBW-ct.Uncached)
+
 		if isCached {
 			ct.Cached = deltaRate*ct.Cached + (1.0-deltaRate)*curBW
 			log.Println("Update cachedThroughput", int64(ct.Cached/1000), "kbits")
@@ -260,8 +273,8 @@ func settings(c *gin.Context) {
 		log.Println("set SetupMode to", SetupMode)
 	}
 	if p := c.PostForm("policy"); p != "" {
-		MPDPolicy = p
-		log.Println("set MPDPolicy to", MPDPolicy)
+		MPDMainPolicy = p
+		log.Println("set MPDMainPolicy to", MPDMainPolicy)
 	}
 	if pf := c.PostForm("prefetch"); pf != "" {
 		PrefetchOff = pf == "0"
@@ -284,7 +297,7 @@ func main() {
 	httpHeadRequests = make(chan func(), 1000)
 	clientThroughput = make(map[string]ClientThroughput)
 	SetupMode = false
-	MPDPolicy = "UNCHANGE"
+	MPDMainPolicy = "UNCHANGE"
 
 	go requestBackend()
 
