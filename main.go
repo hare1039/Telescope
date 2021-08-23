@@ -31,6 +31,8 @@ var MPDMainPolicy string
 var PrefetchOff bool
 var requestHighQuality bool
 
+var CacheSmoothRatio, UncacheSmoothRatio float64
+
 type ClientThroughput struct {
 	Uncached float64
 	Cached   float64
@@ -112,15 +114,6 @@ func proxyHandle(c *gin.Context) {
 	}
 
 	if strings.Contains(pathname, ".mpd") {
-		MPDPolicy := MPDMainPolicy
-		if MPDPolicy == "DYNAMIC" {
-			if requestHighQuality {
-				MPDPolicy = "CACHEBASED"
-			} else {
-				MPDPolicy = "UNCACHEBASED"
-			}
-		}
-
 		proxy.ModifyResponse = func(r *http.Response) error {
 			if r.StatusCode != 200 {
 				log.Println(r)
@@ -152,6 +145,28 @@ func proxyHandle(c *gin.Context) {
 			ipfscache := ipfsCaches[pathkey]
 			//			clientVideoBandwidth := ipfscache.QualitysBandwidth(ipfscache.PrevReqQuality[clientID])
 			cachedSet, latest := ipfscache.Latest(clientID)
+
+			MPDPolicy := MPDMainPolicy
+			if MPDPolicy == "DYNAMIC" {
+				if requestHighQuality {
+					MPDPolicy = "CACHEBASED"
+				} else {
+					MPDPolicy = "UNCACHEBASED"
+				}
+			} else if MPDPolicy == "DYNAMIC-SMOOTH" {
+				if requestHighQuality {
+					MPDPolicy = "CACHEBASED-SMOOTH"
+				} else {
+					MPDPolicy = "UNCACHEBASED-SMOOTH"
+				}
+			} else if MPDPolicy == "DYNAMIC-LOWLEVEL" {
+				if cachedSet.Size() >= 8 {
+					MPDPolicy = "UNCHANGE"
+				} else {
+					MPDPolicy = "UNCACHEBASED"
+				}
+			}
+
 			log.Println("For segment", latest, ":", cachedSet)
 
 			var off uint64 = 0
@@ -164,8 +179,35 @@ func proxyHandle(c *gin.Context) {
 						size := float64(*representation.SegmentTemplate.Duration) * float64(*representation.Bandwidth)
 						// DownloadTime / MPD_BW = AbrLimitTime / NEW_BW
 
-						if MPDPolicy == "CACHEBASED" {
+						if MPDPolicy == "CACHEBASED-SMOOTH" {
 							rate := (size / clientThroughput[clientID].Uncached) / (size / clientThroughput[clientID].Cached)
+							thrCof := 1 / rate
+							cof := CacheSmoothRatio*(1-thrCof) + thrCof
+
+							if !cachedSet.Has(Stoi(*representation.ID)) {
+								if rate < 1.0 {
+									log.Println("skip smaller rewrite", rate)
+								} else {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate * cof)
+								}
+							}
+						} else if MPDPolicy == "UNCACHEBASED-SMOOTH" {
+							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
+							thrCof := 1 / rate
+							cof := UncacheSmoothRatio*(thrCof-1) + 1
+
+							if cachedSet.Has(Stoi(*representation.ID)) {
+								if rate > 1.0 {
+									log.Println("skip greater rewrite", rate)
+								} else {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate * cof)
+								}
+							}
+						} else if MPDPolicy == "CACHEBASED" {
+							rate := (size / clientThroughput[clientID].Uncached) / (size / clientThroughput[clientID].Cached)
+
 							if !cachedSet.Has(Stoi(*representation.ID)) {
 								if rate < 1.0 {
 									log.Println("skip smaller rewrite", rate)
@@ -176,6 +218,7 @@ func proxyHandle(c *gin.Context) {
 							}
 						} else if MPDPolicy == "UNCACHEBASED" {
 							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
+
 							if cachedSet.Has(Stoi(*representation.ID)) {
 								if rate > 1.0 {
 									log.Println("skip greater rewrite", rate)
@@ -254,6 +297,10 @@ func proxyHandle(c *gin.Context) {
 
 		var ct = clientThroughput[clientID]
 		requestHighQuality = math.Abs(curBW-ct.Cached) < math.Abs(curBW-ct.Uncached)
+
+		thr := (ct.Cached + ct.Uncached) / 2
+		CacheSmoothRatio = (curBW - thr) / (ct.Cached - thr)
+		UncacheSmoothRatio = (curBW - ct.Uncached) / (thr - ct.Uncached)
 
 		if isCached {
 			ct.Cached = deltaRate*ct.Cached + (1.0-deltaRate)*curBW
