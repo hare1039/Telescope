@@ -36,6 +36,7 @@ var CacheSmoothRatio, UncacheSmoothRatio float64
 type ClientThroughput struct {
 	Uncached float64
 	Cached   float64
+	CurBW    float64
 }
 
 var clientThroughput map[string]ClientThroughput
@@ -233,6 +234,34 @@ func proxyHandle(c *gin.Context) {
 									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
 								}
 							}
+						} else if MPDPolicy == "UNIFORM" {
+							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
+
+							if cachedSet.Has(Stoi(*representation.ID)) {
+								if rate <= 1.0 {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+								}
+							} else {
+								if rate >= 1.0 {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+								}
+							}
+						} else if MPDPolicy == "UNIFORM-CURRENT" {
+							if cachedSet.Has(Stoi(*representation.ID)) {
+								rate := clientThroughput[clientID].Uncached / clientThroughput[clientID].CurBW
+								if rate <= 1.0 {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+								}
+							} else {
+								rate := clientThroughput[clientID].Cached / clientThroughput[clientID].CurBW
+								if rate >= 1.0 {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+								}
+							}
 						} else if MPDPolicy == "UNCHANGE" {
 							// skip rewrite for debugging purpose
 						} else {
@@ -315,6 +344,7 @@ func proxyHandle(c *gin.Context) {
 			ct.Uncached = deltaRate*ct.Uncached + (1.0-deltaRate)*curBW
 			log.Println("Update uncachedThroughout", int64(ct.Uncached/1000), "kbits")
 		}
+		ct.CurBW = curBW
 		clientThroughput[clientID] = ct
 		ipfscache.AddRecordFromURL(fullpath, clientID)
 	}
