@@ -159,11 +159,11 @@ func proxyHandle(c *gin.Context) {
 				} else {
 					MPDPolicy = "UNCACHEBASED-SMOOTH"
 				}
-			} else if MPDPolicy == "DYNAMIC-LOWLEVEL" {
-				if cachedSet.Size() >= 8 {
+			} else if MPDPolicy == "DYNAMIC-BACKENDSPEED" {
+				if requestHighQuality {
 					MPDPolicy = "UNCHANGE"
 				} else {
-					MPDPolicy = "UNCACHEBASED"
+					MPDPolicy = "UNCACHEBASED-SMOOTH"
 				}
 			}
 
