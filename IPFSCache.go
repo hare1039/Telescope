@@ -134,6 +134,7 @@ func (c *IPFSCache) AddRecordFromURL(url string, clientID string) error {
 }
 
 func (c *IPFSCache) AddRecord(segment uint64, quality int, clientID string) {
+	log.Println("Adding segment", segment, ":", quality)
 	c.IPFSCacheMutex.Lock()
 	defer c.IPFSCacheMutex.Unlock()
 	if _, ok := c.IPFSCachedSegments[segment]; !ok {
@@ -146,10 +147,13 @@ func (c *IPFSCache) AddRecord(segment uint64, quality int, clientID string) {
 	}
 
 	c.IPFSCachedSegments[segment].Add(quality)
-	//	log.Println("Add segment", number, ":", representationID)
+	log.Println("Added segment", segment, ":", quality)
 }
 
 func (c *IPFSCache) Latest(clientID string) (*iset.Set, uint64) {
+	c.IPFSCacheMutex.Lock()
+	defer c.IPFSCacheMutex.Unlock()
+
 	latest := c.LatestProgress[clientID] + 1
 	if val, ok := c.IPFSCachedSegments[latest]; !ok {
 		return &iset.Set{}, latest

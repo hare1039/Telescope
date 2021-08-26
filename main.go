@@ -184,7 +184,7 @@ func proxyHandle(c *gin.Context) {
 						representation.SegmentTemplate.PresentationTimeOffset = &off
 
 						duration := float64(*representation.SegmentTemplate.Duration / *representation.SegmentTemplate.Timescale)
-						size := float64(*representation.SegmentTemplate.Duration) * float64(*representation.Bandwidth)
+						size := duration * float64(*representation.Bandwidth)
 						// DownloadTime / MPD_BW = AbrLimitTime / NEW_BW
 
 						if MPDPolicy == "CACHEBASED-SMOOTH" {
@@ -238,13 +238,14 @@ func proxyHandle(c *gin.Context) {
 						} else if MPDPolicy == "UNIFORM" {
 							var rate float64
 							if cachedSet.Has(Stoi(*representation.ID)) {
+								//fmt.Printf("C %12d\n", uint64(size/clientThroughput[clientID].Cached))
 								rate = (size / clientThroughput[clientID].Cached) / duration
 							} else {
+								//fmt.Printf("U %12d\n", uint64(size/clientThroughput[clientID].Uncached))
 								rate = (size / clientThroughput[clientID].Uncached) / duration
 							}
 							log.Println("Rewrite bw with rate", rate)
 							*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
-
 						} else if MPDPolicy == "UNIFORM-CURRENT" {
 							if cachedSet.Has(Stoi(*representation.ID)) {
 								rate := clientThroughput[clientID].Uncached / clientThroughput[clientID].CurBW
