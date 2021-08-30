@@ -237,14 +237,17 @@ func proxyHandle(c *gin.Context) {
 							}
 						} else if MPDPolicy == "UNIFORM" {
 							var rate float64
+							var cacstr string
 							if cachedSet.Has(Stoi(*representation.ID)) {
 								//fmt.Printf("C %12d\n", uint64(size/clientThroughput[clientID].Cached))
+								cacstr = "cached"
 								rate = (size / clientThroughput[clientID].Cached) / duration
 							} else {
 								//fmt.Printf("U %12d\n", uint64(size/clientThroughput[clientID].Uncached))
+								cacstr = "UNCACH"
 								rate = (size / clientThroughput[clientID].Uncached) / duration
 							}
-							log.Println("Rewrite bw with rate", rate)
+							log.Println("Rewrite", cacstr, "bw with rate", rate)
 							*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
 						} else if MPDPolicy == "UNIFORM-LIMITED" {
 							var rate float64
@@ -267,13 +270,13 @@ func proxyHandle(c *gin.Context) {
 							if cachedSet.Has(Stoi(*representation.ID)) {
 								rate := clientThroughput[clientID].CurBW / clientThroughput[clientID].Cached
 								if rate <= 1.0 {
-									log.Println("Rewrite bw with rate", rate)
+									log.Println("Rewrite cached bw with rate", rate)
 									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
 								}
 							} else {
 								rate := clientThroughput[clientID].CurBW / clientThroughput[clientID].Uncached
 								if rate >= 1.0 {
-									log.Println("Rewrite bw with rate", rate)
+									log.Println("Rewrite UNCACH bw with rate", rate)
 									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
 								}
 							}
@@ -338,12 +341,15 @@ func proxyHandle(c *gin.Context) {
 
 	c.Writer.Flush()
 	transferTime := time.Since(t)
-	if ipfscache, ok := ipfsCaches[pathkey]; ok && c.Writer.Size() > 400000 {
+	if ipfscache, ok := ipfsCaches[pathkey]; ok &&
+		c.Writer.Size() > 400000 &&
+		transferTime > 150*time.Millisecond {
+
 		preloadNextSegment(clientID, ipfscache, fullpath)
 		isCached := ipfscache.AlreadyCachedUrl(fullpath)
 
 		currentBandwidthNS := float64(c.Writer.Size()*8) / float64(transferTime.Nanoseconds())
-		curBW := currentBandwidthNS * float64(time.Second) * float64(time.Nanosecond)
+		curBW := currentBandwidthNS * float64(time.Second) / float64(time.Nanosecond)
 
 		var ct = clientThroughput[clientID]
 		requestHighQuality = math.Abs(curBW-ct.Cached) < math.Abs(curBW-ct.Uncached)
