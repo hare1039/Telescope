@@ -246,15 +246,32 @@ func proxyHandle(c *gin.Context) {
 							}
 							log.Println("Rewrite bw with rate", rate)
 							*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
-						} else if MPDPolicy == "UNIFORM-CURRENT" {
+						} else if MPDPolicy == "UNIFORM-LIMITED" {
+							var rate float64
 							if cachedSet.Has(Stoi(*representation.ID)) {
-								rate := clientThroughput[clientID].Uncached / clientThroughput[clientID].CurBW
+								//fmt.Printf("C %12d\n", uint64(size/clientThroughput[clientID].Cached))
+								rate = (size / clientThroughput[clientID].Cached) / duration
 								if rate <= 1.0 {
 									log.Println("Rewrite bw with rate", rate)
 									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
 								}
 							} else {
-								rate := clientThroughput[clientID].Cached / clientThroughput[clientID].CurBW
+								//fmt.Printf("U %12d\n", uint64(size/clientThroughput[clientID].Uncached))
+								rate = (size / clientThroughput[clientID].Uncached) / duration
+								if rate >= 1.0 {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+								}
+							}
+						} else if MPDPolicy == "UNIFORM-CURRENT" {
+							if cachedSet.Has(Stoi(*representation.ID)) {
+								rate := clientThroughput[clientID].CurBW / clientThroughput[clientID].Cached
+								if rate <= 1.0 {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+								}
+							} else {
+								rate := clientThroughput[clientID].CurBW / clientThroughput[clientID].Uncached
 								if rate >= 1.0 {
 									log.Println("Rewrite bw with rate", rate)
 									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
