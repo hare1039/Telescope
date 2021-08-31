@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	_ "encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -19,6 +20,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/hare1039/go-mpd"
 	"github.com/unki2aut/go-xsd-types"
+
+	"github.com/mikioh/tcp"
+	"github.com/mikioh/tcpinfo"
 )
 
 var remote *url.URL
@@ -44,6 +48,34 @@ var clientThroughput map[string]ClientThroughput
 func requestBackend() {
 	for req := range httpHeadRequests {
 		req()
+	}
+}
+
+func waitTransferEnd(c *gin.Context) {
+	con, _, hijerr := c.Writer.Hijack()
+	if hijerr != nil {
+		return
+	}
+	tc, err := tcp.NewConn(con)
+	if err != nil {
+		return
+	}
+
+	var info tcpinfo.Info
+	var b [256]byte
+
+	if err != nil {
+		return
+	}
+
+	s := "syn"
+	for strings.Contains(s, "syn") ||
+		strings.Contains(s, "established") {
+		i, err := tc.Option(info.Level(), info.Name(), b[:])
+		if err != nil {
+			return
+		}
+		s = fmt.Sprintf("%v", i)
 	}
 }
 
@@ -324,6 +356,7 @@ func proxyHandle(c *gin.Context) {
 
 		t = time.Now()
 		proxy.ServeHTTP(c.Writer, c.Request)
+
 		transferDone <- struct{}{}
 	}()
 
@@ -331,20 +364,27 @@ func proxyHandle(c *gin.Context) {
 	if SetupMode {
 		requestTimeout = 60 * time.Second
 	}
+
+	aborted := false
 	select {
 	case <-transferDone:
 		close(transferDone)
 	case <-time.After(requestTimeout):
 		log.Println(pathname, "trying close")
-		c.Request.Body.Close()
+		//		c.Request.Body.Close()
+		aborted = true
 	}
 
 	c.Writer.Flush()
-	transferTime := time.Since(t)
-	if ipfscache, ok := ipfsCaches[pathkey]; ok &&
-		c.Writer.Size() > 400000 &&
-		transferTime > 150*time.Millisecond {
 
+	if !aborted {
+		waitTransferEnd(c)
+	}
+
+	c.Request.Body.Close()
+
+	transferTime := time.Since(t)
+	if ipfscache, ok := ipfsCaches[pathkey]; ok {
 		preloadNextSegment(clientID, ipfscache, fullpath)
 		isCached := ipfscache.AlreadyCachedUrl(fullpath)
 
