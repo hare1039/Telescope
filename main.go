@@ -267,6 +267,17 @@ func proxyHandle(c *gin.Context) {
 									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
 								}
 							}
+						} else if MPDPolicy == "UNCACHEBASED-FIX1" {
+							rate := (size / clientThroughput[clientID].Cached) / duration
+
+							if cachedSet.Has(Stoi(*representation.ID)) {
+								if rate > 1.0 {
+									log.Println("skip greater rewrite", rate)
+								} else {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+								}
+							}
 						} else if MPDPolicy == "UNIFORM" {
 							var rate float64
 							var cacstr string
@@ -312,7 +323,7 @@ func proxyHandle(c *gin.Context) {
 									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
 								}
 							}
-						} else if MPDPolicy == "UNCHANGE" {
+						} else if MPDPolicy == "UNCHANGE" || MPDPolicy == "BASELINE" {
 							// skip rewrite for debugging purpose
 						} else {
 							log.Println("ERROR!!!RRRRRRRRRR: Unknown policy:", MPDPolicy)
@@ -384,7 +395,7 @@ func proxyHandle(c *gin.Context) {
 	c.Request.Body.Close()
 
 	transferTime := time.Since(t)
-	if ipfscache, ok := ipfsCaches[pathkey]; ok {
+	if ipfscache, ok := ipfsCaches[pathkey]; ok && !aborted {
 		preloadNextSegment(clientID, ipfscache, fullpath)
 		isCached := ipfscache.AlreadyCachedUrl(fullpath)
 
