@@ -256,6 +256,17 @@ func proxyHandle(c *gin.Context) {
 									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
 								}
 							}
+						} else if MPDPolicy == "CACHEBASED-FIX1" {
+							rate := (size / clientThroughput[clientID].Uncached) / duration
+
+							if cachedSet.Has(Stoi(*representation.ID)) {
+								if rate < 1.0 {
+									log.Println("skip smaller rewrite", rate)
+								} else {
+									log.Println("Rewrite bw with rate", rate)
+									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
+								}
+							}
 						} else if MPDPolicy == "UNCACHEBASED" {
 							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
 
