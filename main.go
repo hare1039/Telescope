@@ -13,7 +13,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -29,27 +28,20 @@ var remote *url.URL
 var ipfsCaches map[string]*IPFSCache
 var deltaRate float64 = 0.50
 var IPFSDelay uint64 = 0
-var httpHeadRequests chan func()
 var SetupMode bool
 var MPDMainPolicy string
 var PrefetchOff bool
 var requestHighQuality bool
 
-var CacheSmoothRatio, UncacheSmoothRatio float64
-
 type ClientThroughput struct {
-	Uncached float64
-	Cached   float64
-	CurBW    float64
+	Uncached  float64
+	Cached    float64
+	CurBW     float64
+	CacheHit  float64
+	CacheMiss float64
 }
 
 var clientThroughput map[string]ClientThroughput
-
-func requestBackend() {
-	for req := range httpHeadRequests {
-		req()
-	}
-}
 
 func waitTransferEnd(c *gin.Context) {
 	con, _, hijerr := c.Writer.Hijack()
@@ -76,48 +68,6 @@ func waitTransferEnd(c *gin.Context) {
 			return
 		}
 		s = fmt.Sprintf("%v", i)
-	}
-}
-
-func preloadNextSegment(clientID string, ipfscache *IPFSCache, fullpath string) {
-	if SetupMode || PrefetchOff {
-		return
-	}
-	segment, quality := ipfscache.ParseSegmentQuality(fullpath)
-
-	if segment == 0 {
-		return
-	}
-
-	qualityList := make([]int, 0)
-	for _, value := range ipfscache.URLMatcher {
-		qualityList = append(qualityList, value.Quality)
-	}
-
-	sort.Sort(sort.Reverse(sort.IntSlice(qualityList)))
-
-FindBestQuality:
-	for _, highestQuality := range qualityList {
-		for _, value := range ipfscache.URLMatcher {
-			if value.Quality == highestQuality &&
-				value.Bandwidth < clientThroughput[clientID].Cached {
-				quality = value.Quality
-				break FindBestQuality
-			}
-		}
-	}
-
-	nextsegment := segment + 1
-	pathkey := path.Dir(fullpath)
-	next := remote.Scheme + "://" + remote.Host + pathkey + "/" + ipfscache.FormUrlBySegmentQuality(nextsegment, quality)
-
-	httpHeadRequests <- func() {
-		log.Println("Prefetch Segment", segment, "Quality", quality)
-		if resp, err := http.Get(next); err == nil {
-			ioutil.ReadAll(resp.Body)
-			defer resp.Body.Close()
-			ipfscache.AddRecord(nextsegment, quality, clientID)
-		}
 	}
 }
 
@@ -180,32 +130,6 @@ func proxyHandle(c *gin.Context) {
 			cachedSet, latest := ipfscache.Latest(clientID)
 
 			MPDPolicy := MPDMainPolicy
-			if MPDPolicy == "DYNAMIC" {
-				if requestHighQuality {
-					MPDPolicy = "CACHEBASED"
-				} else {
-					MPDPolicy = "UNCACHEBASED"
-				}
-			} else if MPDPolicy == "DYNAMIC-SMOOTH" {
-				if requestHighQuality {
-					MPDPolicy = "CACHEBASED-SMOOTH"
-				} else {
-					MPDPolicy = "UNCACHEBASED-SMOOTH"
-				}
-			} else if MPDPolicy == "DYNAMIC-LOWLEVEL" {
-				if cachedSet.Size() >= 8 {
-					MPDPolicy = "UNCHANGE"
-				} else {
-					MPDPolicy = "UNCACHEBASED"
-				}
-			} else if MPDPolicy == "DYNAMIC-BACKENDSPEED" {
-				if requestHighQuality {
-					MPDPolicy = "UNCHANGE"
-				} else {
-					MPDPolicy = "UNCACHEBASED-SMOOTH"
-				}
-			}
-
 			log.Println("For segment", latest, ":", cachedSet)
 
 			var off uint64 = 0
@@ -219,44 +143,7 @@ func proxyHandle(c *gin.Context) {
 						size := duration * float64(*representation.Bandwidth)
 						// DownloadTime / MPD_BW = AbrLimitTime / NEW_BW
 
-						if MPDPolicy == "CACHEBASED-SMOOTH" {
-							rate := (size / clientThroughput[clientID].Uncached) / (size / clientThroughput[clientID].Cached)
-							thrCof := 1 / rate
-							cof := CacheSmoothRatio*(1-thrCof) + thrCof
-
-							if !cachedSet.Has(Stoi(*representation.ID)) {
-								if rate < 1.0 {
-									log.Println("skip smaller rewrite", rate)
-								} else {
-									log.Println("Rewrite bw with rate", rate)
-									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate * cof)
-								}
-							}
-						} else if MPDPolicy == "UNCACHEBASED-SMOOTH" {
-							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
-							thrCof := 1 / rate
-							cof := UncacheSmoothRatio*(thrCof-1) + 1
-
-							if cachedSet.Has(Stoi(*representation.ID)) {
-								if rate > 1.0 {
-									log.Println("skip greater rewrite", rate)
-								} else {
-									log.Println("Rewrite bw with rate", rate)
-									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate * cof)
-								}
-							}
-						} else if MPDPolicy == "CACHEBASED" {
-							rate := (size / clientThroughput[clientID].Uncached) / (size / clientThroughput[clientID].Cached)
-
-							if !cachedSet.Has(Stoi(*representation.ID)) {
-								if rate < 1.0 {
-									log.Println("skip smaller rewrite", rate)
-								} else {
-									log.Println("Rewrite bw with rate", rate)
-									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
-								}
-							}
-						} else if MPDPolicy == "CACHEBASED-FIX1" {
+						if MPDPolicy == "CACHEBASED" {
 							rate := (size / clientThroughput[clientID].Uncached) / duration
 
 							if cachedSet.Has(Stoi(*representation.ID)) {
@@ -268,17 +155,6 @@ func proxyHandle(c *gin.Context) {
 								}
 							}
 						} else if MPDPolicy == "UNCACHEBASED" {
-							rate := (size / clientThroughput[clientID].Cached) / (size / clientThroughput[clientID].Uncached)
-
-							if cachedSet.Has(Stoi(*representation.ID)) {
-								if rate > 1.0 {
-									log.Println("skip greater rewrite", rate)
-								} else {
-									log.Println("Rewrite bw with rate", rate)
-									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
-								}
-							}
-						} else if MPDPolicy == "UNCACHEBASED-FIX1" {
 							rate := (size / clientThroughput[clientID].Cached) / duration
 
 							if cachedSet.Has(Stoi(*representation.ID)) {
@@ -292,50 +168,22 @@ func proxyHandle(c *gin.Context) {
 						} else if MPDPolicy == "UNIFORM" {
 							var rate float64
 							var cacstr string
+							client := clientThroughput[clientID]
 							if cachedSet.Has(Stoi(*representation.ID)) {
 								//fmt.Printf("C %12d\n", uint64(size/clientThroughput[clientID].Cached))
 								cacstr = "cached"
-								rate = (size / clientThroughput[clientID].Cached) / duration
+								rate = (size / client.Cached) / duration
+								rate = 1 + (rate-1)*(client.CacheMiss/(client.CacheHit+client.CacheMiss))
 							} else {
 								//fmt.Printf("U %12d\n", uint64(size/clientThroughput[clientID].Uncached))
 								cacstr = "UNCACH"
-								rate = (size / clientThroughput[clientID].Uncached) / duration
+								rate = (size / client.Uncached) / duration
+								rate = 1 + (rate-1)*(client.CacheMiss/(client.CacheHit+client.CacheMiss))
 							}
 							log.Println("Rewrite", cacstr, "bw with rate", rate)
 							*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
-						} else if MPDPolicy == "UNIFORM-LIMITED" {
-							var rate float64
-							if cachedSet.Has(Stoi(*representation.ID)) {
-								//fmt.Printf("C %12d\n", uint64(size/clientThroughput[clientID].Cached))
-								rate = (size / clientThroughput[clientID].Cached) / duration
-								if rate <= 1.0 {
-									log.Println("Rewrite bw with rate", rate)
-									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
-								}
-							} else {
-								//fmt.Printf("U %12d\n", uint64(size/clientThroughput[clientID].Uncached))
-								rate = (size / clientThroughput[clientID].Uncached) / duration
-								if rate >= 1.0 {
-									log.Println("Rewrite bw with rate", rate)
-									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
-								}
-							}
-						} else if MPDPolicy == "UNIFORM-CURRENT" {
-							if cachedSet.Has(Stoi(*representation.ID)) {
-								rate := clientThroughput[clientID].CurBW / clientThroughput[clientID].Cached
-								if rate <= 1.0 {
-									log.Println("Rewrite cached bw with rate", rate)
-									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
-								}
-							} else {
-								rate := clientThroughput[clientID].CurBW / clientThroughput[clientID].Uncached
-								if rate >= 1.0 {
-									log.Println("Rewrite UNCACH bw with rate", rate)
-									*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
-								}
-							}
 						} else if MPDPolicy == "UNCHANGE" || MPDPolicy == "BASELINE" {
-							// skip rewrite for debugging purpose
+							// skip rewrite for baseline
 						} else {
 							log.Println("ERROR!!!RRRRRRRRRR: Unknown policy:", MPDPolicy)
 						}
@@ -351,7 +199,7 @@ func proxyHandle(c *gin.Context) {
 			}
 
 			buf := bytes.NewBuffer(newmpd)
-			r.Body = ioutil.NopCloser(buf)
+
 			r.Header["Content-Length"] = []string{fmt.Sprint(buf.Len())}
 			r.Header["Last-Modified"] = []string{time.Now().UTC().Format(http.TimeFormat)}
 			r.Header["Cache-Control"] = []string{"no-cache"}
@@ -407,7 +255,6 @@ func proxyHandle(c *gin.Context) {
 
 	transferTime := time.Since(t)
 	if ipfscache, ok := ipfsCaches[pathkey]; ok && !aborted {
-		preloadNextSegment(clientID, ipfscache, fullpath)
 		isCached := ipfscache.AlreadyCachedUrl(fullpath)
 
 		currentBandwidthNS := float64(c.Writer.Size()*8) / float64(transferTime.Nanoseconds())
@@ -416,18 +263,17 @@ func proxyHandle(c *gin.Context) {
 		var ct = clientThroughput[clientID]
 		requestHighQuality = math.Abs(curBW-ct.Cached) < math.Abs(curBW-ct.Uncached)
 
-		thr := (ct.Cached + ct.Uncached) / 2
-		CacheSmoothRatio = (curBW - thr) / (ct.Cached - thr)
-		UncacheSmoothRatio = (curBW - ct.Uncached) / (thr - ct.Uncached)
-
 		if isCached {
 			ct.Cached = deltaRate*ct.Cached + (1.0-deltaRate)*curBW
+			ct.CacheHit += 1.0
 			log.Println("Update cachedThroughput", int64(ct.Cached/1000), "kbits")
 		} else {
 			ct.Uncached = deltaRate*ct.Uncached + (1.0-deltaRate)*curBW
+			ct.CacheMiss += 1.0
 			log.Println("Update uncachedThroughout", int64(ct.Uncached/1000), "kbits")
 		}
-		ct.CurBW = curBW
+		ct.CurBW = curBW*deltaRate + ct.CurBW*(1.0-deltaRate)
+
 		clientThroughput[clientID] = ct
 		ipfscache.AddRecordFromURL(fullpath, clientID)
 	}
@@ -460,12 +306,9 @@ func main() {
 	}
 
 	ipfsCaches = make(map[string]*IPFSCache)
-	httpHeadRequests = make(chan func(), 1000)
 	clientThroughput = make(map[string]ClientThroughput)
 	SetupMode = false
-	MPDMainPolicy = "UNCHANGE"
-
-	go requestBackend()
+	MPDMainPolicy = "BASELINE"
 
 	r := gin.Default()
 	//	r.Use(func(c *gin.Context) {
