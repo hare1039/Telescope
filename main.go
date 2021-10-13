@@ -178,7 +178,7 @@ func proxyHandle(c *gin.Context) {
 								//fmt.Printf("U %12d\n", uint64(size/clientThroughput[clientID].Uncached))
 								cacstr = "UNCACH"
 								rate = (size / client.Uncached) / duration
-								rate = 1 + (rate-1)*(client.CacheMiss/(client.CacheHit+client.CacheMiss))
+								rate = 1 + (rate-1)*(client.CacheHit/(client.CacheHit+client.CacheMiss))
 							}
 							log.Println("Rewrite", cacstr, "bw with rate", rate)
 							*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
