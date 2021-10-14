@@ -38,9 +38,10 @@ var requestHighQuality bool
 var CacheSmoothRatio, UncacheSmoothRatio float64
 
 type ClientThroughput struct {
-	Uncached float64
-	Cached   float64
-	CurBW    float64
+	Uncached  float64
+	Cached    float64
+	CurBW     float64
+	CacheHist []float64
 }
 
 var clientThroughput map[string]ClientThroughput
@@ -131,6 +132,7 @@ func proxyHandle(c *gin.Context) {
 	if _, ok := clientThroughput[clientID]; !ok {
 		clientThroughput[clientID] = ClientThroughput{
 			Cached:   15.0 * 1000 * 1000,
+			CurBW:    12.0 * 1000 * 1000,
 			Uncached: 10.0 * 1000 * 1000,
 		}
 	}
@@ -292,16 +294,33 @@ func proxyHandle(c *gin.Context) {
 						} else if MPDPolicy == "UNIFORM" {
 							var rate float64
 							var cacstr string
+
+							cachehit := 0.0
+							counttotal := float64(len(clientThroughput[clientID].CacheHist))
+							for _, v := range clientThroughput[clientID].CacheHist {
+								cachehit += v
+							}
+							cachemiss := counttotal - cachehit
+							log.Println(cachehit, cachemiss, counttotal)
+
 							if cachedSet.Has(Stoi(*representation.ID)) {
 								//fmt.Printf("C %12d\n", uint64(size/clientThroughput[clientID].Cached))
 								cacstr = "cached"
 								rate = (size / clientThroughput[clientID].Cached) / duration
+
+								if counttotal != 0 {
+									rate = 1 + (rate-1)*(cachemiss/counttotal)
+								}
 							} else {
 								//fmt.Printf("U %12d\n", uint64(size/clientThroughput[clientID].Uncached))
 								cacstr = "UNCACH"
 								rate = (size / clientThroughput[clientID].Uncached) / duration
+
+								if counttotal != 0 {
+									rate = 1 + (rate-1)*(cachehit/counttotal)
+								}
 							}
-							log.Println("Rewrite", cacstr, "bw with rate", rate)
+							log.Println("Rewrite", cacstr, "bw with adjust rate", rate)
 							*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
 						} else if MPDPolicy == "UNIFORM-LIMITED" {
 							var rate float64
@@ -406,7 +425,7 @@ func proxyHandle(c *gin.Context) {
 	c.Request.Body.Close()
 
 	transferTime := time.Since(t)
-	if ipfscache, ok := ipfsCaches[pathkey]; ok && !aborted {
+	if ipfscache, ok := ipfsCaches[pathkey]; ok && !aborted && !strings.Contains(pathname, ".mpd") {
 		preloadNextSegment(clientID, ipfscache, fullpath)
 		isCached := ipfscache.AlreadyCachedUrl(fullpath)
 
@@ -420,14 +439,18 @@ func proxyHandle(c *gin.Context) {
 		CacheSmoothRatio = (curBW - thr) / (ct.Cached - thr)
 		UncacheSmoothRatio = (curBW - ct.Uncached) / (thr - ct.Uncached)
 
+		isCachedVal := 1.0
 		if isCached {
 			ct.Cached = deltaRate*ct.Cached + (1.0-deltaRate)*curBW
 			log.Println("Update cachedThroughput", int64(ct.Cached/1000), "kbits")
 		} else {
 			ct.Uncached = deltaRate*ct.Uncached + (1.0-deltaRate)*curBW
+			isCachedVal = 0.0
 			log.Println("Update uncachedThroughout", int64(ct.Uncached/1000), "kbits")
 		}
-		ct.CurBW = curBW
+		ct.CacheHist = append(ct.CacheHist, isCachedVal)
+		log.Println("append with cacheval", isCachedVal, fullpath)
+		ct.CurBW = deltaRate*ct.CurBW + (1.0-deltaRate)*curBW
 		clientThroughput[clientID] = ct
 		ipfscache.AddRecordFromURL(fullpath, clientID)
 	}

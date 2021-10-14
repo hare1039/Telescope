@@ -129,6 +129,8 @@ func (c *IPFSCache) AddRecordFromURL(url string, clientID string) error {
 	segment, quality := c.ParseSegmentQuality(url)
 	if segment != 0 {
 		c.AddRecord(segment, quality, clientID)
+	} else {
+		log.Println("add record segment = 0")
 	}
 	return nil
 }
@@ -156,7 +158,8 @@ func (c *IPFSCache) Latest(clientID string) (*iset.Set, uint64) {
 
 	latest := c.LatestProgress[clientID] + 1
 	if val, ok := c.IPFSCachedSegments[latest]; !ok {
-		return &iset.Set{}, latest
+		c.IPFSCachedSegments[latest] = iset.New()
+		return c.IPFSCachedSegments[latest], latest
 	} else {
 		return val, latest
 	}
