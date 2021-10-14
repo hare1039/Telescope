@@ -37,8 +37,7 @@ type ClientThroughput struct {
 	Uncached  float64
 	Cached    float64
 	CurBW     float64
-	CacheHit  float64
-	CacheMiss float64
+	CacheHist []float64
 }
 
 var clientThroughput map[string]ClientThroughput
@@ -126,11 +125,11 @@ func proxyHandle(c *gin.Context) {
 			mpdv.AvailabilityStartTime = timeZero
 
 			ipfscache := ipfsCaches[pathkey]
-			//			clientVideoBandwidth := ipfscache.QualitysBandwidth(ipfscache.PrevReqQuality[clientID])
 			cachedSet, latest := ipfscache.Latest(clientID)
 
 			MPDPolicy := MPDMainPolicy
 			log.Println("For segment", latest, ":", cachedSet)
+			log.Println("REQRITINGUNIFORM", MPDPolicy)
 
 			var off uint64 = 0
 			for _, p := range mpdv.Period {
@@ -166,19 +165,31 @@ func proxyHandle(c *gin.Context) {
 								}
 							}
 						} else if MPDPolicy == "UNIFORM" {
+
 							var rate float64
 							var cacstr string
 							client := clientThroughput[clientID]
+							cachehit := 0.0
+							counttotal := float64(len(client.CacheHist))
+							for _, v := range client.CacheHist {
+								cachehit += v
+							}
+							cachemiss := counttotal - cachehit
+
 							if cachedSet.Has(Stoi(*representation.ID)) {
 								//fmt.Printf("C %12d\n", uint64(size/clientThroughput[clientID].Cached))
 								cacstr = "cached"
 								rate = (size / client.Cached) / duration
-								rate = 1 + (rate-1)*(client.CacheMiss/(client.CacheHit+client.CacheMiss))
+								if len(client.CacheHist) > 0 {
+									rate = 1 + (rate-1)*(cachemiss/counttotal)
+								}
 							} else {
 								//fmt.Printf("U %12d\n", uint64(size/clientThroughput[clientID].Uncached))
 								cacstr = "UNCACH"
 								rate = (size / client.Uncached) / duration
-								rate = 1 + (rate-1)*(client.CacheHit/(client.CacheHit+client.CacheMiss))
+								if len(client.CacheHist) > 0 {
+									rate = 1 + (rate-1)*(cachehit/counttotal)
+								}
 							}
 							log.Println("Rewrite", cacstr, "bw with rate", rate)
 							*representation.Bandwidth = uint64(float64(*representation.Bandwidth) * rate)
@@ -265,11 +276,11 @@ func proxyHandle(c *gin.Context) {
 
 		if isCached {
 			ct.Cached = deltaRate*ct.Cached + (1.0-deltaRate)*curBW
-			ct.CacheHit += 1.0
+			ct.CacheHist = append(ct.CacheHist, 1.0)
 			log.Println("Update cachedThroughput", int64(ct.Cached/1000), "kbits")
 		} else {
 			ct.Uncached = deltaRate*ct.Uncached + (1.0-deltaRate)*curBW
-			ct.CacheMiss += 1.0
+			ct.CacheHist = append(ct.CacheHist, 0.0)
 			log.Println("Update uncachedThroughout", int64(ct.Uncached/1000), "kbits")
 		}
 		ct.CurBW = curBW*deltaRate + ct.CurBW*(1.0-deltaRate)
