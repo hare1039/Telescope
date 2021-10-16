@@ -172,7 +172,7 @@ func proxyHandle(c *gin.Context) {
 						size := duration * float64(*representation.Bandwidth)
 						// DownloadTime / MPD_BW = AbrLimitTime / NEW_BW
 
-						if MPDPolicy == "CACHEBASED-FIX1" {
+						if MPDPolicy == "CACHEBASED" {
 							rate := (size / clientThroughput[clientID].Uncached) / duration
 
 							if cachedSet.Has(Stoi(*representation.ID)) {
