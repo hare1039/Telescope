@@ -199,11 +199,26 @@ func proxyHandle(c *gin.Context) {
 							if cachedSet.Has(Stoi(*representation.ID)) {
 								reward := ct.Cached - ct.CurBW
 								log.Println("Reward BW", reward)
-								*representation.Bandwidth = uint64(float64(*representation.Bandwidth) - reward)
+								bw := float64(*representation.Bandwidth) - reward
+								if bw <= 0 {
+									bw = 1
+								}
+								*representation.Bandwidth = uint64(bw)
 							} else {
 								penalty := ct.CurBW - ct.Uncached
 								log.Println("Penalty BW", penalty)
 								*representation.Bandwidth = uint64(float64(*representation.Bandwidth) + penalty)
+							}
+						} else if MPDPolicy == "UNIFORM-SWEET" {
+							ct := clientThroughput[clientID]
+							if cachedSet.Has(Stoi(*representation.ID)) {
+								reward := ct.Cached - ct.CurBW
+								log.Println("Reward BW", reward)
+								bw := float64(*representation.Bandwidth) - reward
+								if bw <= 0 {
+									bw = 1
+								}
+								*representation.Bandwidth = uint64(bw)
 							}
 						} else if MPDPolicy == "UNCHANGE" || MPDPolicy == "BASELINE" {
 							// skip rewrite for debugging purpose
