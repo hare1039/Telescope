@@ -6,10 +6,11 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/hare1039/go-mpd"
 	"github.com/scylladb/go-set/iset"
-	"github.com/unki2aut/go-mpd"
 )
 
 type Matcher struct {
@@ -21,15 +22,20 @@ type Matcher struct {
 
 type IPFSCache struct {
 	IPFSCachedSegments map[uint64]*iset.Set
+	IPFSCacheMutex     sync.Mutex
 	mpdTree            mpd.MPD
 	SegmentDuration    time.Duration
 	URLMatcher         map[string]Matcher
+	LatestProgress     map[string]uint64
+	PrevReqQuality     map[string]int
 }
 
 func NewIPFSCache(m *mpd.MPD) *IPFSCache {
 	c := new(IPFSCache)
 	c.IPFSCachedSegments = make(map[uint64]*iset.Set)
 	c.URLMatcher = make(map[string]Matcher)
+	c.LatestProgress = make(map[string]uint64)
+	c.PrevReqQuality = make(map[string]int)
 	c.mpdTree = *m
 	c.PrepareURLMatcher()
 	return c
@@ -65,6 +71,8 @@ func (c *IPFSCache) AlreadyCachedUrl(url string) bool {
 }
 
 func (c *IPFSCache) AlreadyCached(segment uint64, quality int) bool {
+	c.IPFSCacheMutex.Lock()
+	defer c.IPFSCacheMutex.Unlock()
 	if segment == 0 || c.IPFSCachedSegments[segment] == nil {
 		return false
 	}
@@ -83,6 +91,15 @@ func (c *IPFSCache) GreatestQuality(segment uint64) int {
 		}
 	}
 	return max
+}
+
+func (c *IPFSCache) QualitysBandwidth(quality int) float64 {
+	for _, value := range c.URLMatcher {
+		if value.Quality == quality {
+			return value.Bandwidth
+		}
+	}
+	return 0.0
 }
 
 func (c *IPFSCache) FormUrlBySegmentQuality(segment uint64, quality int) string {
@@ -108,21 +125,44 @@ func (c *IPFSCache) ParseSegmentQuality(url string) (uint64, int) {
 	return segment, quality
 }
 
-func (c *IPFSCache) AddRecordFromURL(url string) error {
+func (c *IPFSCache) AddRecordFromURL(url string, clientID string) error {
 	segment, quality := c.ParseSegmentQuality(url)
 	if segment != 0 {
-		c.AddRecord(segment, quality)
+		c.AddRecord(segment, quality, clientID)
+	} else {
+		log.Println("add record segment = 0")
 	}
 	return nil
 }
 
-func (c *IPFSCache) AddRecord(segment uint64, quality int) {
+func (c *IPFSCache) AddRecord(segment uint64, quality int, clientID string) {
+	log.Println("Adding segment", segment, ":", quality)
+	c.IPFSCacheMutex.Lock()
+	defer c.IPFSCacheMutex.Unlock()
 	if _, ok := c.IPFSCachedSegments[segment]; !ok {
 		c.IPFSCachedSegments[segment] = iset.New()
 	}
 
+	if segment != 0 {
+		c.LatestProgress[clientID] = segment
+		c.PrevReqQuality[clientID] = quality
+	}
+
 	c.IPFSCachedSegments[segment].Add(quality)
-	//	log.Println("Add segment", number, ":", representationID)
+	log.Println("Added segment", segment, ":", quality)
+}
+
+func (c *IPFSCache) Latest(clientID string) (*iset.Set, uint64) {
+	c.IPFSCacheMutex.Lock()
+	defer c.IPFSCacheMutex.Unlock()
+
+	latest := c.LatestProgress[clientID] + 1
+	if val, ok := c.IPFSCachedSegments[latest]; !ok {
+		c.IPFSCachedSegments[latest] = iset.New()
+		return c.IPFSCachedSegments[latest], latest
+	} else {
+		return val, latest
+	}
 }
 
 func (c *IPFSCache) Print() {
