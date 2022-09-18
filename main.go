@@ -268,9 +268,9 @@ func proxyHandle(c *gin.Context) {
 		transferDone <- struct{}{}
 	}()
 
-	requestTimeout := 15 * time.Second
+	requestTimeout := 30 * time.Second
 	if SetupMode {
-		requestTimeout = 60 * time.Second
+		requestTimeout = 300 * time.Second
 	}
 
 	aborted := false

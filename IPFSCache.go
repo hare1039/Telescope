@@ -1,8 +1,11 @@
 package main
 
 import (
+	_ "encoding/json"
 	"fmt"
+	_ "io"
 	"log"
+	"net/http"
 	"path"
 	"strconv"
 	"strings"
@@ -163,6 +166,37 @@ func (c *IPFSCache) Latest(clientID string) (*iset.Set, uint64) {
 	} else {
 		return val, latest
 	}
+}
+
+type GatewayResponse struct {
+	Err string `json:"Err"`
+	Ref string `json:"Ref"`
+}
+
+func (c *IPFSCache) MaintainCacheFromAPI(url string) {
+	for {
+		spaceClient := http.Client{
+			Timeout: time.Second * 20, // Timeout after 2 seconds
+		}
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		res, err := spaceClient.Do(req)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if res.Body != nil {
+			defer res.Body.Close()
+		}
+
+		//body, err := io.ReadAll(res.Body)
+	}
+
+	c.IPFSCacheMutex.Lock()
+	defer c.IPFSCacheMutex.Unlock()
 }
 
 func (c *IPFSCache) Print() {
